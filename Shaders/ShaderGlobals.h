@@ -37,8 +37,19 @@ struct VSInput
 #define PI 					(3.1415926535897932f)
 #endif
 
+/*
 #ifndef START_CONST_NUM
 #define START_CONST_NUM		b3
+#endif
+*/
+
+#ifndef FIRST_USER_CONSTBUFF
+#define FIRST_USER_CONSTBUFF b4
+#endif
+
+// Metallicafan212:	OLDVER!
+#ifndef START_CONST_NUM
+#define START_CONST_NUM FIRST_USER_CONSTBUFF
 #endif
 
 // Metallicafan212:	If to define the "final" color function
@@ -52,13 +63,25 @@ struct VSInput
 
 #ifndef MAX_TEX_NUM
 #define MAX_TEX_NUM 16
-// Metallicafan212:	Proton doesn't like math in definitions.....
-#define TEX_ARRAY_SIZE 4//(MAX_TEX_NUM / 4)
+	// Metallicafan212:	Proton doesn't like math in definitions.....
+	#if WINE
+	#define TEX_ARRAY_SIZE 4
+	#else
+	#define TEX_ARRAY_SIZE (MAX_TEX_NUM / 4)
+	#endif
 #endif
 
+// Metallicafan212: Texture vars were moved to another constant buffer (since it could change per draw call or not)
+//					Since per-shader information should be limited, it shouldn't be writing it all the time
+/*
 #ifndef COMMON_VARS	
 	#define COMMON_VARS \
 		int4	bTexturesBound[TEX_ARRAY_SIZE]			: packoffset(c0);
+#endif
+*/
+
+#ifndef COMMON_VARS
+	#define COMMON_VARS
 #endif
 
 #if DO_STANDARD_BUFFER
@@ -67,32 +90,35 @@ cbuffer CommonBuffer : register (START_CONST_NUM)
     COMMON_VARS
 };
 #endif
+
+
 #ifdef DO_FINAL_COLOR
 
 // Metallicafan212:	Define the base constant buffer!!!!
 cbuffer FrameVariables : register (b0)
 {
-	matrix 	Proj			: packoffset(c0);
-	float	Gamma			: packoffset(c4.x);
-	float2	ViewSize		: packoffset(c4.y);
-	int		bDoSelection	: packoffset(c4.w);
-	int		bOneXLightmaps	: packoffset(c5.x);
-	int		bCorrectFog		: packoffset(c5.y);
-	int		bHDR			: packoffset(c5.z);
-	int 	GammaMode		: packoffset(c5.w);
-	float	HDRExpansion	: packoffset(c6.x);
-	float 	ResolutionScale : packoffset(c6.y);
-	float	WhiteLevel		: packoffset(c6.z);
-	float 	PadHDR2			: packoffset(c6.w);
+	matrix 	Proj				: packoffset(c0);
+	float	Gamma				: packoffset(c4.x);
+	float2	ViewSize			: packoffset(c4.y);
+	int		bDoSelection		: packoffset(c4.w);
+	int		bOneXLightmaps		: packoffset(c5.x);
+	int		bCorrectFog			: packoffset(c5.y);
+	int		bHDR				: packoffset(c5.z);
+	int 	GammaMode			: packoffset(c5.w);
+	float	HDRExpansion		: packoffset(c6.x);
+	float 	ResolutionScale 	: packoffset(c6.y);
+	float	WhiteLevel			: packoffset(c6.z);
+	//float 	PadHDR2			: packoffset(c6.w);
+	int		bDepthDraw			: packoffset(c6.w);
+	float	DepthDrawLimit		: packoffset(c7.x);
+	
+	// Metallicafan212:	DX9 gamma offset values
+	float	GammaOffsetRed		: packoffset(c7.y);
+	float	GammaOffsetBlue		: packoffset(c7.z);
+	float	GammaOffsetGreen	: packoffset(c7.w);
+	
+	//float3	Paddddddd		: packoffset(c7.y);
 };
-
-// Metallicafan212:	I did the same thing I did for polyflags, and made the whole enum a set of defines
-/*
-// Metallicafan212:	TODO! Find a way to mirror this as defines?
-#define GM_XOpenGL 		0
-#define GM_PerObject	1
-#define GM_DX9			2
-*/
 
 cbuffer DFogVariables : register (b1)
 {
@@ -112,6 +138,11 @@ cbuffer PolyflagVars : register (b2)
 	// Metallicafan212: Temp hack until I recode gamma to be screen-based again, using a different algo
 	int		bModulated			: packoffset(c1.x);
 	float3	Pad					: packoffset(c1.y);
+};
+
+cbuffer TextureVariables : register (b3)
+{
+	int4	bTexturesBound[TEX_ARRAY_SIZE]			: packoffset(c0);
 };
 
 // Metallicafan212:	Moved from the ResScaling.hlsl shader
@@ -149,10 +180,13 @@ float DoDistanceFog(float InZ)//float4 InPos)
 // Metallicafan212:	Global selection color
 static float4 SelectionColor;
 
+// Metallicafan212:	HACK!!! To reject black and white on UI tiles, I don't want to have to update all the shaders...
+static bool		bRejectBW;
+
 // Metallicafan212:	Color masking is currently unimplemented and may not be reimplemented
 
 // Metallicafan212:	Do masked rejection
-#define CLIP_PIXEL(ColorIn) if(!bAlphaEnabled) ColorIn.w = 1.0f; SelectionColor = input.color; clip(ColorIn.w - AlphaReject);
+#define CLIP_PIXEL(ColorIn) if(!bAlphaEnabled) ColorIn.w = 1.0f; SelectionColor = input.color; clip(ColorIn.w - AlphaReject); if(bDepthDraw) ColorIn.xyz = input.origZ / DepthDrawLimit;/*input.pos.z / 1.2;*/
 
 float4 DoPixelFog(float DistFog, float4 Color)
 {
@@ -165,21 +199,24 @@ float4 DoPixelFog(float DistFog, float4 Color)
 	float3 Temp = DistanceFogColor.xyz - Color.xyz;
 	Temp *= DistanceFogColor.w;
 	
-	Temp = (Temp * DistFog) + Color;//mad(Temp, DistFog, Color);
+	Temp = (Temp * DistFog) + Color.xyz;
 	
 	return float4(Temp, Color.w);
 }
 
+// Metallicafan212:	Not needed now, the per object gamma was removed
+/*
 float4 DoGammaCorrection(float4 ColorIn)
 {
 	if(GammaMode != GM_PerObject || Gamma == 1.0f || bModulated)
 		return ColorIn;
 	
 	float OverGamma = 1.0f / Gamma;
-	ColorIn.xyz = pow(ColorIn.xyz, float3(OverGamma, OverGamma, OverGamma));
+	ColorIn.xyz = pow(abs(ColorIn.xyz), float3(OverGamma, OverGamma, OverGamma));
 	
 	return ColorIn;
 }
+*/
 
 float4 DoFinalColor(float4 ColorIn)
 {
@@ -196,27 +233,17 @@ float4 DoFinalColor(float4 ColorIn)
 		}
 	}
 	
-	// Metallicafan212:	Gamma correct the color!!!!
-	//float OverGamma = 1.0f / Gamma;
-	//ColorIn.xyz = pow(ColorIn.xyz, float3(OverGamma, OverGamma, OverGamma));
-	
-	// Metallicafan212:	If doing HDR, change to linear color
-	//if(GammaMode == GM_PerObject && bHDR && !bModulated)
-	//{
-	//	ColorIn.xyz = pow(ColorIn.xyz, float3(2.2f, 2.2f, 2.2f)) * HDRExpansion;
-	//}
-	
-	/*
-	// Metallicafan212:	If we're using HDR, change the color space?
-	if(bHDR)//&& !bModulated)
+	// Metallicafan212:	In the depth mode, just return back the color (it's handled in the macro above)
+	if(bDepthDraw)
 	{
-		//ColorIn.xyz *= WhiteLevel * HDRExpansion;
-		ColorIn.xyz = SRGBToRec2020(ColorIn);
+		return ColorIn;
 	}
-	*/
+	
+	// Metallicafan212:	Clamp the color
+	ColorIn.xyz = clamp(ColorIn.xyz, 0.0, 1.0);
 	
 	// Metallicafan212:	Early return
-	if(BWPercent <= 0.0f)
+	if(BWPercent <= 0.0f || bRejectBW)
 	{
 		return ColorIn;
 	}

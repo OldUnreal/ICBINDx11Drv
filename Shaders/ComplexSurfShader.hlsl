@@ -7,16 +7,16 @@ cbuffer CommonBuffer : register (START_CONST_NUM)
 {
 	COMMON_VARS
 	// Metallicafan212:	The info we use for this specific shader
-	float4 	XAxis 		: packoffset(c4);
-	float4 	YAxis 		: packoffset(c5);
+	float4 	XAxis 		: packoffset(c0);
+	float4 	YAxis 		: packoffset(c1);
 	
-	float4 	PanScale[5]	: packoffset(c6);
+	float4 	PanScale[5]	: packoffset(c2);
 	
 	// Metallicafan212:	We need the original values passed in for the lightmap scale...
-	float2 	LightScale 	: packoffset(c11.x);
+	float2 	LightScale 	: packoffset(c7.x);
 	
 	// Metallicafan212:	And for the fogmap...
-	float2 	FogScale	: packoffset(c11.z);
+	float2 	FogScale	: packoffset(c8.z);
 	
 };
 
@@ -39,10 +39,6 @@ Texture2D Macro				: register(t2);
 Texture2D Fogmap			: register(t3);
 Texture2D Detail			: register(t4);
 
-// Metallicafan212:	Hacked depth input
-//					TODO! We're only going to sample this when 
-//Texture2D<float> 	PortalHack		: register(t16);
-
 // Metallicafan212:	Samplers for each texture
 SamplerState DiffState 		: register(s0);
 SamplerState LightState 	: register(s1);
@@ -60,7 +56,7 @@ struct PSInput
 	float4 dUV		: TEXCOORD4;
 	float4 color	: COLOR0; 
 	float4 fog		: COLOR1;
-	float  distFog	: COLOR2;
+	float  origZ	: COLOR2;
 	float2 detVars	: COLOR3;
 };
 
@@ -76,16 +72,19 @@ PSInput VertShader(VSInput input)
 	PSInput output = (PSInput)0;
 	
 	// Metallicafan212:	Set the W to 1 so matrix math works
-	input.pos.w 	= 1.0f;
+	input.pos.w 		= 1.0f;
 	
 	// Metallicafan212:	Transform it out
-	output.pos 		= mul(input.pos, Proj);
-	output.color	= input.color;
+	output.pos 			= mul(input.pos, Proj);
+	output.color		= input.color;
+	
+	// Metallicafan212:	Mix in the vertex color from the fog value
+	output.color.xyz   += (input.fog.xyz * input.fog.w);
 	
 	#if EXTRA_VERT_INFO && !COMPLEX_SURF_MANUAL_UVs
 	// Metallicafan212:	TODO! I'm lazy, just define the variables here
-	float4 XAxis 	= input.XAxis;
-	float4 YAxis	= input.YAxis;
+	float4 XAxis 		= input.XAxis;
+	float4 YAxis		= input.YAxis;
 	
 	float4 PanScale[5];
 	PanScale[0]			= input.PanScale1;
@@ -141,8 +140,7 @@ PSInput VertShader(VSInput input)
 	// Metallicafan212:	Pass out the original Z
 	output.dUV.z	= input.pos.z;
 	
-	// Metallicafan212:	Do the final fog value
-	//output.distFog	= DoDistanceFog(output.pos);
+	output.origZ	= input.pos.z;
 	
 	return output;
 }
@@ -151,34 +149,13 @@ PSOutput PxShader(PSInput input)
 {	
 	PSOutput Out;
 	
-	/*
-	if(bIsInvis)
-	{
-		Out.Extra.x = input.pos.z;
-		Out.Color 	= float4(0.0f, 0.0f, 0.0f, 0.0f);
-		
-		return Out;
-	}
-	else
-	{
-		// Metallicafan212:	Sample it!!!
-		float test = PortalHack.Sample(DiffState, input.pos.xy);
-		
-		// Metallicafan212:	Reject rendering of this face if it's less!!!
-		if(test < input.pos.z)
-		{
-			clip(-1);
-		}
-	}
-	*/
-	
 	// Metallicafan212:	TODO! Texturing
 	float4 DiffColor = input.color;
 	
 	// Metallicafan212:	Diffuse texture
 	if(bTexturesBound[0].x != 0)
 	{
-		float4 Diff  	= DoGammaCorrection(Diffuse.SampleBias(DiffState, input.uv, 0.0f));
+		float4 Diff  	= Diffuse.SampleBias(DiffState, input.uv, 0.0f);
 		DiffColor.xyz  *= Diff.xyz;
 		DiffColor.w	   *= Diff.w;
 	}
@@ -210,7 +187,7 @@ PSOutput PxShader(PSInput input)
 	//					This just modulates the color, like the lightmap
 	if(bTexturesBound[0].z != 0)
 	{
-		DiffColor.xyz *= Macro.SampleBias(MacroState, input.mUV, 0.0f).xyz;
+		DiffColor.xyz *= Macro.SampleBias(MacroState, input.mUV, 0.0f).xyz * 2.0f;
 	}
 	
 	//float lAlpha = 1.0f;
@@ -238,9 +215,7 @@ PSOutput PxShader(PSInput input)
 	if(bTexturesBound[0].w != 0)
 	{
 		float4 FogColor = Fogmap.SampleBias(FogState, input.fUV, 0.0f);
-		DiffColor.xyz 	= (DiffColor * (1.0f - FogColor.w)) + FogColor.xyz;//mad(DiffColor.xyz, (1.0f - FogColor.w), FogColor.xyz);
-		//DiffColor.xyz *= FogColor.w;
-		//DiffColor.xyz += FogColor.xyz;
+		DiffColor.xyz 	= (DiffColor.xyz * (1.0f - FogColor.w)) + FogColor.xyz;//mad(DiffColor.xyz, (1.0f - FogColor.w), FogColor.xyz);
 	}
 	
 	// Metallicafan212:	Set our alpha for lumos
@@ -252,7 +227,7 @@ PSOutput PxShader(PSInput input)
 	// Metallicafan212:	Get the distance fog, using the pixel depth
 	if(bDoDistanceFog)
 	{
-		float NewFog = DoDistanceFog(input.dUV.z);
+		float NewFog = DoDistanceFog(input.origZ);
 		
 		DiffColor = DoPixelFog(/*input.distFog*/NewFog, DiffColor);
 	}

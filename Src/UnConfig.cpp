@@ -27,6 +27,10 @@ void UICBINDx11RenderDevice::StaticConstructor()
 	EditorInfo.EditorIcon	= IMG_FOLDER TEXT("inres\\viewport\\RD_D11");
 	EditorInfo.Name			= TEXT("Directx 11 Render Device");
 	EditorInfo.ToolTip		= TEXT("Directx 11 Rendering");
+
+	// Metallicafan212:	Tell Render.dll to not clamp the final output values for actor mesh verts
+	bSupportsUnclampedMeshLighting = 1;
+
 #endif
 
 	// Metallicafan212:	Tell the engine that we support the lighting shader
@@ -44,6 +48,9 @@ void UICBINDx11RenderDevice::StaticConstructor()
 	SupportsLazyTextures= 0;
 	PrefersDeferredLoad = 0;
 	SupportsTC			= 1;
+
+	// Metallicafan212:	Mark it as certified
+	DescFlags |= RDDESCF_Certified;
 
 #if DX11_HP2
 	// Metallicafan212:	HP2 Rendertarget textures
@@ -103,35 +110,9 @@ void UICBINDx11RenderDevice::StaticConstructor()
 	AddFloatProp(CPP_PROP(OrthoLineThickness), 1.2f);
 
 	AddBoolProp(CPP_PROP(bDebugSelection), 0);
-	//AddBoolProp(CPP_PROP(bUseD3D11On12), 0);
-
-	// Metallicafan212:	TODO! Go in game to determine what these values should be
-	//AddFloatProp(CPP_PROP(TileAAUVMove), 0.1f);
-	//TileAAUVMove = 0.1f;
-
-	/*
-	// Metallicafan212:	TODO! MSAA resolve related vars
-	AddBoolProp(CPP_PROP(bUseMSAAComputeShader), 1);
-	AddFloatProp(CPP_PROP(MSAAFilterSize), 0.5f);
-	AddFloatProp(CPP_PROP(MSAAGaussianSigma), 1.0f);
-	AddFloatProp(CPP_PROP(MSAACubicB), 1.0f);
-	AddFloatProp(CPP_PROP(MSAACubicC), 2.69f);
-	AddIntProp(CPP_PROP(MSAAFilterType), 8);
-	*/
 
 	AddBoolProp(CPP_PROP(bDisableDebugInterface), 1);
 	AddBoolProp(CPP_PROP(bDisableSDKLayers), 1);
-
-	/*
-	// Metallicafan212:	Load the old setting, if it's available
-	UseVSync = 0;
-	UBOOL bTest = 0;
-
-	if (GConfig->GetBool(ClsName, TEXT("bVSync"), bTest))
-	{
-		UseVSync = bTest;
-	}
-	*/
 
 	AddBoolProp(CPP_PROP(UseVSync), 0);
 
@@ -160,6 +141,10 @@ void UICBINDx11RenderDevice::StaticConstructor()
 
 	AddFloatProp(CPP_PROP(GammaOffset), 0.0f);
 
+	AddFloatProp(CPP_PROP(GammaOffsetRed), 0.0f);
+	AddFloatProp(CPP_PROP(GammaOffsetBlue), 0.0f);
+	AddFloatProp(CPP_PROP(GammaOffsetGreen), 0.0f);
+
 	AddBoolProp(CPP_PROP(bOneXLightmaps), 0);
 	AddBoolProp(CPP_PROP(bEnableCorrectFogging), 1);
 
@@ -187,6 +172,23 @@ void UICBINDx11RenderDevice::StaticConstructor()
 #endif
 
 	AddIntProp(CPP_PROP(HDRWhiteBalanceNits), 0);
+
+	AddFloatProp(CPP_PROP(DepthDrawZLimit), 5000.0f);
+
+	// Metallicafan212:	For some reason on my system, this runs slightly faster
+	AddBoolProp(CPP_PROP(bUseMultiThreadedDevice), 1);
+
+	// Metallicafan212:	If we have the multi-threaded device, allow for deferred rendering to work
+	//					TODO! This doesn't work AT ALL!
+	//AddBoolProp(CPP_PROP(bUseDeferredRendering), 1);
+
+	// Metallicafan212:	If to load the precompiled shaders from the bytes in the binary, rather than recompile when an invalid shader cache is encountered
+	AddBoolProp(CPP_PROP(bUsePrecompiledShaders), 0);
+
+	//AddFloatProp(CPP_PROP(TileAAUVMove), 0.001f);
+
+	// Metallicafan212:	Enable this by default, but disable it if it's not supported
+	AddBoolProp(CPP_PROP(bUseForcedSampleCount), 1);
 
 	unguard;
 }
@@ -372,34 +374,38 @@ void UICBINDx11RenderDevice::ClampUserOptions()
 	if(LastAASamples != NumAASamples)
 		GLog->Logf(TEXT("DX11: Requesting %d AA samples"), NumAASamples);
 
+	// Metallicafan212:	Use a positive number, fixes text being offset on NV
+	TileAAUVMove = (GIsEditor ? 0.001f : -0.001f);
+	/*
 	// Metallicafan212:	TODO! Hard-coded offsets to make tiles not look like ass....
 	switch (NumAASamples)
 	{
 		case 0:
 		case 1:
 		{
-			TileAAUVMove = -0.001f;
+			TileAAUVMove = 0.001f;
 			break;
 		}
 
 		case 2:
 		{
-			TileAAUVMove = -0.001f;
+			TileAAUVMove = 0.001f;
 			break;
 		}
 
 		case 4:
 		{
-			TileAAUVMove = -0.001f;//0.5f;
+			TileAAUVMove = 0.001f;//0.5f;
 			break;
 		}
 
 		case 8:
 		{
-			TileAAUVMove = -0.001f;//0.2f;
+			TileAAUVMove = 0.001f;//0.2f;
 			break;
 		}
 	}
+	*/
 
 	// Metallicafan212:	Set this here now
 	LastGamma = Gamma;

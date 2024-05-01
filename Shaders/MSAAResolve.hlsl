@@ -9,13 +9,13 @@ cbuffer CommonBuffer : register (START_CONST_NUM)
 	COMMON_VARS
 	
 	// Metallicafan212:	The info we use for this specific shader	
-	float	FilterSize				: packoffset(c4.x);
-	float	GaussianSigma 			: packoffset(c4.y);
-	float	CubicB					: packoffset(c4.z);
-	float 	CubicC					: packoffset(c4.w);
-	int		FilterType				: packoffset(c5.x);
-	float3	Pad3					: packoffset(c5.y);
-	float4 	SampleOffsets[8]		: packoffset(c6);
+	float	FilterSize				: packoffset(c0.x);
+	float	GaussianSigma 			: packoffset(c0.y);
+	float	CubicB					: packoffset(c0.z);
+	float 	CubicC					: packoffset(c0.w);
+	int		FilterType				: packoffset(c1.x);
+	float3	Pad3					: packoffset(c1.y);
+	float4 	SampleOffsets[8]		: packoffset(c2);
 };
 
 // Metallicafan212:	HACK!!!! This includes this twice to define the final color function, as HLSL cannot do out of order compiling
@@ -54,7 +54,7 @@ PSInput VertShader(VSInput input)
 	
 	// Metallicafan212:	Transform it out
 	output.pos 		= mul(input.pos, Proj);
-	output.uv		= input.uv;
+	output.uv		= input.uv.xy;
 	
 	return output;
 }
@@ -396,7 +396,7 @@ float4 PxShader(PSInput input) : SV_TARGET
 #else
 
 // Metallicafan212:	Resolve the MSAA texture to this current pixel
-[numthreads(32, 32, 1)]
+[numthreads(8, 8, 1)]
 void CSMain( uint3 dispatchThreadID : SV_DispatchThreadID )
 {
 	// Metallicafan212:	Sample both the render target and the depth target

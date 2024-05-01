@@ -3,7 +3,10 @@
 #define USE_MSAA_COMPUTE 1
 #define USE_RES_COMPUTE 0
 
-#define FIRST_USER_CONSTBUFF 3
+#define FIRST_USER_CONSTBUFF 4
+#define MACRO_STR(mac) #mac
+#define MACRO_TO_STR(mac) MACRO_STR(mac)
+#define FIRST_USER_CONSTBUFF_STR MACRO_TO_STR(FIRST_USER_CONSTBUFF)
 
 // Metallicafan212:	Shader folder
 //					Some people may not want to have shaders next to Textures, Sounds, etc.
@@ -41,8 +44,24 @@ struct FFrameShaderVars
 	// Metallicafan212:	Display white level
 	FLOAT				WhiteLevel;
 
+	// Metallicafan212:	If to output depth as the color, instead of the normal color
+	UBOOL				bDepthDraw;
+
+	// Metallicafan212:	Configured Z range for the depth draw mode
+	FLOAT				DepthZRange;
+
+	// Metallicafan212:	DX9 mode gamma correction variables
+	FLOAT				GammaOffsetRed;
+	FLOAT				GammaOffsetGreen;
+	FLOAT				GammaOffsetBlue;
+
 	// Metallicafan212:	Additional padding
-	FLOAT				Pad[1];//2];//3];
+	//FLOAT				Pad[3];
+
+	FFrameShaderVars()
+	{
+		appMemzero(this, sizeof(FFrameShaderVars));
+	}
 };
 
 // Metallicafan212:	Just a buffer for fog settings
@@ -84,6 +103,12 @@ struct FPolyflagVars
 
 // Metallicafan212:	Common shader variables
 struct FShaderVarCommon
+{
+	// Metallicafan212:	What textures are currently bound
+	//UBOOL	BoundTextures[MAX_TEXTURES];
+};
+
+struct FBoundTextures
 {
 	// Metallicafan212:	What textures are currently bound
 	UBOOL	BoundTextures[MAX_TEXTURES];
@@ -176,6 +201,8 @@ public:
 			Macros.AddItem({ "WINE", "0" });
 		}
 
+		Macros.AddItem({ "FIRST_USER_CONSTBUFF", "b" FIRST_USER_CONSTBUFF_STR});
+
 #if EXTRA_VERT_INFO
 		Macros.AddItem({"EXTRA_VERT_INFO", "1"});
 #if !COMPLEX_SURF_MANUAL_UVs
@@ -230,6 +257,9 @@ public:
 	virtual void Init();
 
 	virtual void Bind(ID3D11DeviceContext* UseContext);
+
+	// Metallicafan212:	Actually set the shader(s) in the context
+	virtual void SetShaders(ID3D11DeviceContext* UseContext);
 
 	// Metallicafan212:	Made this generic so we can copy vars into shaders
 	virtual void SetupConstantBuffer();
@@ -323,7 +353,8 @@ public:
 	FD3DTileShader() :
 		FD3DShader(),
 		bDoTileRotation(0),
-		TileCoords()
+		TileCoords(),
+		bDoMSAAFontHack(0)
 	{
 		//ShaderFile	= TEXT("..\\Shaders\\TileShader.hlsl");
 		VertexFile	= SHADER_FOLDER TEXT("TileShader.hlsl");
@@ -437,9 +468,11 @@ public:
 	// Metallicafan212:	Constructor that inits the device pointer
 	FD3DSurfShader(class UICBINDx11RenderDevice* InParent);
 
+#if !EXTRA_VERT_INFO
 	virtual void SetupConstantBuffer();
 
 	virtual void WriteConstantBuffer(void* InMem);
+#endif
 };
 
 

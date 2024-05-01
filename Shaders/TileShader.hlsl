@@ -7,12 +7,12 @@ cbuffer CommonBuffer : register (START_CONST_NUM)
 	COMMON_VARS
 	
 	// Metallicafan212:	The info we use for this specific shader
-	float4		XAxis		: packoffset(c4);
-	float4		YAxis		: packoffset(c5);
-	float4		ZAxis		: packoffset(c6);
-	int			bDoRot		: packoffset(c7.x);
-	int			bDoUVHack	: packoffset(c7.y);
-	float2		Pad3		: packoffset(c7.z);
+	float4		XAxis		: packoffset(c0);
+	float4		YAxis		: packoffset(c1);
+	float4		ZAxis		: packoffset(c2);
+	int			bDoRot		: packoffset(c3.x);
+	int			bDoUVHack	: packoffset(c3.y);
+	float2		Pad3		: packoffset(c3.z);
 };
 
 // Metallicafan212:	HACK!!!! This includes this twice to define the final color function, as HLSL cannot do out of order compiling
@@ -70,7 +70,7 @@ float4 PxShader(PSInput input) : SV_TARGET
 {
 	float2 UseUV = input.uv;
 	
-	float4 DiffColor = DoGammaCorrection(Diffuse.SampleBias(DiffState, UseUV, 0.0f)) * input.color;
+	float4 DiffColor = Diffuse.SampleBias(DiffState, UseUV, 0.0f) * input.color;
 	
 	// Metallicafan212:	Do alpha rejecting
 	//					TODO! This also sets the global selection color for the editor!
@@ -83,6 +83,8 @@ float4 PxShader(PSInput input) : SV_TARGET
 		float Fog = DoDistanceFog(input.origZ);
 		DiffColor = DoPixelFog(Fog, DiffColor);
 	}
+	
+	bRejectBW = input.bRejectBW;
 	
 	DiffColor = DoFinalColor(DiffColor);
 

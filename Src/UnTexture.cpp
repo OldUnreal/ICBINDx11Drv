@@ -8,7 +8,7 @@ FMipmap* GetBaseMip(FTextureInfo& Info)
 		return nullptr;
 
 #if DX11_HP2
-	return Info.Mips[0];
+	return Info.Mips[Info.LOD];
 #elif DX11_UT_469
 	UBOOL Compressed = FIsCompressedFormat(Info.Format);
 	return Info.Texture != nullptr ? (Compressed ? &Info.Texture->CompMips(Info.LOD) : &Info.Texture->Mips(Info.LOD)) : nullptr;
@@ -16,7 +16,7 @@ FMipmap* GetBaseMip(FTextureInfo& Info)
 }
 
 // Metallicafan212:	Texturing related functions (since there's going to be quite a bit)
-void UICBINDx11RenderDevice::SetTexture(INT TexNum, FTextureInfo* Info, PFLAG PolyFlags)
+void UICBINDx11RenderDevice::SetTexture(INT TexNum, FTextureInfo* Info, PFLAG PolyFlags, UBOOL bNoAF)
 {
 	guardSlow(UICBINDx11RenderDevice::SetTexture);
 
@@ -28,7 +28,7 @@ void UICBINDx11RenderDevice::SetTexture(INT TexNum, FTextureInfo* Info, PFLAG Po
 		// Metallicafan212:	Only end buffering if the slot wasn't null before!!!
 		if (TX.TexInfoHash != 0)
 			EndBuffering();
-		else if(TX.m_SRV != nullptr)
+		else if (TX.m_SRV != nullptr)
 			// Metallicafan212:	It's already been null-d out
 			return;
 
@@ -37,9 +37,19 @@ void UICBINDx11RenderDevice::SetTexture(INT TexNum, FTextureInfo* Info, PFLAG Po
 		TX.VMult		= 1.0f;
 		TX.TexInfoHash	= 0;
 		TX.m_SRV		= BlankResourceView;
+		TX.Flags		= 0;
 
+#if !DO_BUFFERED_DRAWS
 		m_RenderContext->PSSetShaderResources(TexNum, 1, &BlankResourceView);
 		m_RenderContext->PSSetSamplers(TexNum, 1, &BlankSampler);
+#else
+		// Metallicafan212:	Set it on the maps
+		CheckDrawCall();
+		CurrentDraw->TBinds[TexNum] = BlankResourceView;
+		CurrentDraw->SBinds[TexNum]	= BlankSampler;
+#endif
+
+		bWriteTexturesBuffer = 1;
 
 		return;
 	}
@@ -50,36 +60,15 @@ void UICBINDx11RenderDevice::SetTexture(INT TexNum, FTextureInfo* Info, PFLAG Po
 		PolyFlags |= PF_AlphaToCoverage;
 #endif
 
-
-
-	/*
-	// Metallicafan212:	TILE HACK!!!
-	//					Load the texture directly ONLY for font characters!!!
-	//					Intel and AMD both sample correctly
-	if (bIsNV && (TexNum == 0 && PolyFlags & PF_NoSmooth && Info->NumMips == 1))
-	{
-		GlobalShaderVars.bNVTileHack = 1;
-	}
-	else
-	{
-		GlobalShaderVars.bNVTileHack = 0;
-	}
-	*/
-
 	// Metallicafan212:	Adjust the cache ID to fix masking issues (per the DX9 driver)
 	//					Like said before, this was disabled because it slots ALL textures into the first bucket
 	QWORD CacheID = Info->CacheID;
 
-	//if ((CacheID & 0xFF) == 0xE0)
-	//{
-	//	//Alter texture cache id if masked texture hack is enabled and texture is masked
-	//	CacheID |= ((PolyFlags & PF_Masked) ? 1 : 0);
-	//}
-
 	// Metallicafan212:	End buffering if the input texture doesn't match!!!
 	UBOOL bSetTex = 0;
-	//DWORD CacheHash = GetCacheHash(Info->CacheID);
-	if ((TX.TexInfoHash != 0 && TX.TexInfoHash != Info->CacheID))//CacheHash))
+
+	// Metallicafan212:	We have to be able to draw without a texture, so we do have to not ignore hash 0
+	if ((TX.TexInfoHash != Info->CacheID))
 	{
 		bSetTex = 1;
 		EndBuffering();
@@ -99,22 +88,23 @@ void UICBINDx11RenderDevice::SetTexture(INT TexNum, FTextureInfo* Info, PFLAG Po
 #endif
 
 	// Metallicafan212:	Check if we need to upload it to the GPU
-	//					(REMOVED, DUE TO MULTIPLE MAPS) I also check masked as we need to rehack the palette when mask changes
-	UBOOL bUpload			= DaTex == nullptr || bTexChanged; //|| ( ((PolyFlags & PF_Masked) ^ (DaTex->PolyFlags & PF_Masked)) == PF_Masked);
+	//					Masked textures get placed in a separate map, so they can be toggled on and off without a refresh
+	//					This uses more memory, but results in more consistent FPS and behavior
+	UBOOL bUpload			= DaTex == nullptr || bTexChanged;
 
 	if(bUpload)
 	{
 		DaTex = CacheTextureInfo(*Info, PolyFlags);
-
-		// Metallicafan212:	Get the new bind, if it's changed
-		//DaTex = TextureMap.Find(Info->CacheID, PolyFlags);
 	}
+
+	// Metallicafan212:	Save the UV clamp state here
+	PolyFlags |= (DaTex->bShouldUVClamp ? PF_ClampUVs : 0);
 
 	// Metallicafan212:	Calculate the new values
 	FLOAT NewUMult = 1.0f / (Info->UScale * Info->USize);
 	FLOAT NewVMult = 1.0f / (Info->VScale * Info->VSize);
 
-	// Metallicafan212:	Fix some lightmap related issues
+	// Metallicafan212:	Fix some lightmap related issues, check UV mult and UV pan
 	if (bSetTex || NewUMult != TX.UMult || NewVMult != TX.VMult || TX.UPan != Info->Pan.X || TX.VPan != Info->Pan.Y)
 	{
 		bSetTex = 1;
@@ -152,31 +142,63 @@ void UICBINDx11RenderDevice::SetTexture(INT TexNum, FTextureInfo* Info, PFLAG Po
 	{
 		UDX11RenderTargetTexture* TexTemp = (UDX11RenderTargetTexture*)Info->Texture;
 
+#if !DO_BUFFERED_DRAWS
 		m_RenderContext->PSSetShaderResources(TexNum, 1, TexTemp->RTSRView.GetAddressOf());
+#else
+		CurrentDraw->TBinds[TexNum] = TexTemp->RTSRView.Get();
+#endif
 
-		ID3D11SamplerState* Temp = GetSamplerState((PolyFlags) | (DaTex->bShouldUVClamp ? PF_ClampUVs : 0), DaTex->MipSkip, 0);//DaTex->bSkipMipZero ? 1 : 0, 0);
+		ID3D11SamplerState* Temp = GetSamplerState((PolyFlags) | (DaTex->bShouldUVClamp ? PF_ClampUVs : 0), DaTex->MipSkip, 0, bNoAF);//DaTex->bSkipMipZero ? 1 : 0, 0);
+
+#if !DO_BUFFERED_DRAWS
 		m_RenderContext->PSSetSamplers(TexNum, 1, &Temp);
+#else
+		CurrentDraw->SBinds[TexNum] = Temp;
+#endif
 		//m_RenderContext->PSSetSamplers(TexNum, 1, &BlankSampler);
 
 		// Metallicafan212:	So we can find whatever is still bound as the RT when we call OMSetRenderTargets
 		TX.m_SRV = TexTemp->RTSRView.Get();
 
+		bWriteTexturesBuffer = 1;
+
 		return;
 	}
 #endif
 
-	TX.m_SRV = DaTex->m_View;
+	// Metallicafan212:	Only actually set the slot if we need to
+	if (bSetTex || TX.m_SRV == nullptr || TX.Flags != PolyFlags)
+	{
+		TX.m_SRV = DaTex->m_View;
 
-	m_RenderContext->PSSetShaderResources(TexNum, 1, &DaTex->m_View);
+#if !DO_BUFFERED_DRAWS
+		m_RenderContext->PSSetShaderResources(TexNum, 1, &DaTex->m_View);
+#else
+		CurrentDraw->TBinds[TexNum] = DaTex->m_View;
+#endif
 
-	ID3D11SamplerState* Temp = GetSamplerState((PolyFlags) | (DaTex->bShouldUVClamp ? PF_ClampUVs : 0), DaTex->MipSkip, 0);//DaTex->bSkipMipZero ? 1 : 0, 0);
-	m_RenderContext->PSSetSamplers(TexNum, 1, &Temp);
+		ID3D11SamplerState* Temp = GetSamplerState(PolyFlags, DaTex->MipSkip, 0, bNoAF);
+
+#if !DO_BUFFERED_DRAWS
+		m_RenderContext->PSSetSamplers(TexNum, 1, &Temp);
+#else
+		CurrentDraw->SBinds[TexNum] = Temp;
+#endif
+
+		TX.Flags = PolyFlags;
+
+		bWriteTexturesBuffer = 1;
+	}
 
 	unguardSlow;
 }
 
-FORCEINLINE UBOOL GetMipInfo(FTextureInfo& Info, FD3DTexType* Type, INT MipNum, BYTE*& DataPtr, INT& Size, INT& SourcePitch, INT& MipW, INT& MipH)
+FORCEINLINE UBOOL GetMipInfo(FTextureInfo& Info, FD3DTexture* Tex, BYTE* ConversionMem, INT MipNum, BYTE*& DataPtr, INT& Size, INT& SourcePitch, INT& MipW, INT& MipH)
 {
+	// Metallicafan212:	Add on the texture LOD setting
+	if (Info.Texture != nullptr)
+		MipNum += Info.LOD;
+
 #if DX11_HP2
 	FMipmap* Mip = Info.Mips[MipNum];
 
@@ -197,7 +219,7 @@ FORCEINLINE UBOOL GetMipInfo(FTextureInfo& Info, FD3DTexType* Type, INT MipNum, 
 	MipW	= Mip->USize;
 	MipH	= Mip->VSize;
 
-	SourcePitch = Type->GetPitch(Mip->USize);
+	SourcePitch = Tex->D3DTexType->GetPitch(Mip->USize);
 
 	if (Size <= 0)
 	{
@@ -207,17 +229,35 @@ FORCEINLINE UBOOL GetMipInfo(FTextureInfo& Info, FD3DTexType* Type, INT MipNum, 
 #elif DX11_UT_469
 
 	// Metallicafan212:	Add on the texture LOD setting
-	if(Info.Texture != nullptr)
-		MipNum += Info.LOD;
+	//if(Info.Texture != nullptr)
+	//	MipNum += Info.LOD;
 
 	UBOOL Compressed	= FIsCompressedFormat(Info.Format);
 	FMipmap* Mip		= Info.Texture ? (Compressed ? &Info.Texture->CompMips(MipNum) : &Info.Texture->Mips(MipNum)) : nullptr;
-	if (Mip)
+	if (Mip != nullptr)
 	{
-		Mip->LoadMip();
-		DataPtr = Mip->DataPtr;
-		Size    = Mip->DataArray.Num();
-		SourcePitch = FTextureBlockBytes(Info.Format) * FTextureBlockAlignedWidth(Info.Format, Mip->USize) / FTextureBlockWidth(Info.Format);
+		// Metallicafan212:	See if it needs to be decompressed!
+		if (Tex->bDecompress)
+		{
+			Mip->LoadMip();
+			TArray<BYTE> Decomp = UTexture::DecompressMip(Info.Format, Mip, TEXF_RGBA8_);//TEXF_BGRA8);
+
+			if (Decomp.Num())
+			{
+				appMemcpy(ConversionMem, &Decomp(0), Decomp.Num());
+
+				DataPtr			= ConversionMem;
+				Size			= Decomp.Num();
+				SourcePitch		= FTextureBlockBytes(TEXF_BGRA8) * FTextureBlockAlignedWidth(TEXF_BGRA8, Mip->USize) / FTextureBlockWidth(TEXF_BGRA8);
+			}
+		}
+		else
+		{
+			Mip->LoadMip();
+			DataPtr		= Mip->DataPtr;
+			Size		= Mip->DataArray.Num();
+			SourcePitch = FTextureBlockBytes(Info.Format) * FTextureBlockAlignedWidth(Info.Format, Mip->USize) / FTextureBlockWidth(Info.Format);
+		}
 
 		// Metallicafan212:	Provide out the mip's size
 		MipW	= Mip->USize;
@@ -227,8 +267,8 @@ FORCEINLINE UBOOL GetMipInfo(FTextureInfo& Info, FD3DTexType* Type, INT MipNum, 
 	{	
 		// probably a light or fog map	
 		FMipmapBase* MipBase = Info.Mips[MipNum];
-		DataPtr = MipBase->DataPtr;
-		Size    = FTextureBytes(Info.Format, MipBase->USize, MipBase->VSize);
+		DataPtr		= MipBase->DataPtr;
+		Size		= FTextureBytes(Info.Format, MipBase->USize, MipBase->VSize);
 		SourcePitch = FTextureBlockBytes(Info.Format) * FTextureBlockAlignedWidth(Info.Format, MipBase->USize) / FTextureBlockWidth(Info.Format);
 
 		// Metallicafan212:	Provide out the mip's size
@@ -365,9 +405,29 @@ FD3DTexture* UICBINDx11RenderDevice::CacheTextureInfo(FTextureInfo& Info, PFLAG 
 
 		Type = f != SupportedTextures.end() ? &f->second : nullptr;
 #endif
-
 		if (Type == nullptr)
+		{
 			appErrorf(TEXT("Metallicafan212 you idiot, you forgot to add a descriptor for %d"), DaTex->Format);
+		}
+
+		// Metallicafan212:	Test here if we need to conver it to a different format
+		if (Type->bIsCompressed)
+		{
+			// Metallicafan212:	Check if it's not pow2, and if so, if the U and V sizes are different
+			UBOOL bNeedsConversion = (__popcnt(Info.USize) != 1 || __popcnt(Info.VSize) != 1) && Info.USize != Info.VSize;
+
+			if (bNeedsConversion)
+			{
+				// Metallicafan212:	New destination will be RGBA8
+#if DX11_HP2 || DX11_UT_469
+				Type = &SupportedTextures.find(TEXF_BGRA8)->second;
+#else
+				Type = &SupportedTextures.find(TEXF_RGBA8)->second;
+#endif
+
+				DaTex->bDecompress = 1;
+			}
+		}
 
 		DaTex->D3DTexType = Type;
 
@@ -484,7 +544,7 @@ FD3DTexture* UICBINDx11RenderDevice::CacheTextureInfo(FTextureInfo& Info, PFLAG 
 	if (DaTex->m_Tex == nullptr)
 	{
 		// Metallicafan212:	Check for the info
-		DaTex->Format		= Info.Format;
+		DaTex->Format		= Type->Format;//Info.Format;
 		DaTex->TexFormat	= Type->DXFormat;
 
 		// Metallicafan212:	Create the texture
@@ -644,7 +704,7 @@ FD3DTexture* UICBINDx11RenderDevice::CacheTextureInfo(FTextureInfo& Info, PFLAG 
 			guardSlow(ConvertTexture);
 
 			// Metallicafan212:	Convert the mip (could be P8 or RGBA7)
-			UBOOL bMaskedHack	= (Info.Format == TEXF_P8 && PolyFlags & PF_Masked);
+			UBOOL bMaskedHack	= (Type->Format == TEXF_P8 && PolyFlags & PF_Masked);
 
 			// Metallicafan212:	TODO! Mask hack it!!
 			FColor OldMasked	= (Info.Palette != nullptr ? Info.Palette[0] : FColor(0, 0, 0, 0));
@@ -802,7 +862,7 @@ void UICBINDx11RenderDevice::DirectCP(FTextureInfo& Info, FD3DTexture* Tex, INT 
 	INT	H		= 0;
 
 	// Metallicafan212:	TODO! Do this more optimized!
-	if (GetMipInfo(Info, Tex->D3DTexType, Mip, Data, Size, Pitch, W, H))
+	if (GetMipInfo(Info, Tex, ConversionMemory, Mip, Data, Size, Pitch, W, H))
 	{
 		if (!bPartial)
 		{
@@ -854,7 +914,7 @@ void UICBINDx11RenderDevice::RGBA7To8(FTextureInfo& Info, FD3DTexture* Tex, INT 
 	INT	H		= 0;
 
 	// Metallicafan212:	TODO! Do this more optimized!
-	if (GetMipInfo(Info, Tex->D3DTexType, Mip, Data, Size, Pitch, W, H))
+	if (GetMipInfo(Info, Tex, ConversionMemory, Mip, Data, Size, Pitch, W, H))
 	{
 		// Metallicafan212:	TODO! Partial uploads
 		if (bPartial)
@@ -920,10 +980,10 @@ void UICBINDx11RenderDevice::RGBA7To8(FTextureInfo& Info, FD3DTexture* Tex, INT 
 					{
 						// Metallicafan212:	Move it over
 						//					We multiply by 2 to expand 7 bits to 8
-						*pTex = (Base[Min<DWORD>(x & RUSize, UClamp)]) * 2;
+						*pTex++ = (Base[Min<DWORD>(x & RUSize, UClamp)]) << 1;//* 2;
 
 						// Metallicafan212:	P8 is forcibly converted to ARGB, so we don't need to respect pitch if we already know 32bpp
-						pTex++;
+						//pTex++;
 					}
 				}
 			}
@@ -932,7 +992,7 @@ void UICBINDx11RenderDevice::RGBA7To8(FTextureInfo& Info, FD3DTexture* Tex, INT 
 				while (Read < Size)
 				{
 					DWORD* Addr			= (DWORD*)&Bytes[Read];
-					(*(DWORD*)DBytes)	= (*Addr) * 2;
+					(*(DWORD*)DBytes)	= (*Addr) << 1;//* 2;
 
 					Read	+= 4;
 					DBytes	+= 4;
@@ -1018,7 +1078,7 @@ void UICBINDx11RenderDevice::P8ToRGBA(FTextureInfo& Info, FD3DTexture* Tex, INT 
 	// Metallicafan212:	TODO! Partial uploads!
 
 	// Metallicafan212:	TODO! Do this more optimized!
-	if (GetMipInfo(Info, Tex->D3DTexType, Mip, Data, Size, Pitch, W, H))
+	if (GetMipInfo(Info, Tex, ConversionMemory, Mip, Data, Size, Pitch, W, H))
 	{
 		// Metallicafan212:	Update each 4 byte block
 		SIZE_T	Read	= 0;
@@ -1096,21 +1156,7 @@ void UICBINDx11RenderDevice::SetBlend(PFLAG PolyFlags)
 {
 	guardSlow(UICBINDx11RenderDevice::SetBlend);
 
-	// Metallicafan212:	Cut it down to only specific flags
-	if (!(PolyFlags & (PF_Translucent | PF_Modulated | PF_Highlighted | PF_LumosAffected)))
-	{
-		PolyFlags |= PF_Occlude;
-	}
-	else if (PolyFlags & PF_Translucent)
-	{
-		PolyFlags &= ~(PF_Masked | PF_ColorMask);
-	}
-
-	// Metallicafan212:	Pixel based selection requires that we have alpha blending and nothing else
-	if (GIsEditor && m_HitData != nullptr)
-	{
-		PolyFlags = (PolyFlags & ~(PF_Translucent | PF_Modulated | PF_Highlighted | PF_LumosAffected));//| PF_AlphaBlend;
-	}
+	ADJUST_PFLAGS(PolyFlags);
 
 	// Metallicafan212:	Check if the input blend flags are relevant
 #if DX11_HP2
@@ -1169,18 +1215,6 @@ void UICBINDx11RenderDevice::SetBlend(PFLAG PolyFlags)
 						bState = CreateBlend(PF_Invisible, D3D11_BLEND_ZERO, D3D11_BLEND_ONE, D3D11_COLOR_WRITE_ENABLE_ALPHA);
 					}
 				}
-				/*
-				else if (blendFlags == PF_Highlighted)
-				{
-					//FindAndSetBlend(PF_Highlighted, D3D11_BLEND_ONE, D3D11_BLEND_INV_SRC_ALPHA);
-					bState = GetBlendState(PF_Highlighted);
-
-					if (bState == nullptr)
-					{
-						bState = CreateBlend(PF_Highlighted, D3D11_BLEND_ONE, D3D11_BLEND_INV_SRC_ALPHA);
-					}
-				}
-				*/
 #if DX11_HP2 || DX11_HP1
 #if DX11_HP2
 				else if (blendFlags & PF_Translucent && (blendFlags & PF_Highlighted || blendFlags & PF_AlphaBlend))
@@ -1308,7 +1342,13 @@ void UICBINDx11RenderDevice::SetBlend(PFLAG PolyFlags)
 			// Metallicafan212:	If we got a valid blend state, set it
 			if (bState != nullptr)
 			{
+#if !DO_BUFFERED_DRAWS
 				m_RenderContext->OMSetBlendState(bState, nullptr, 0xFFFFFFFF);
+#else
+				CheckDrawCall();
+				CurrentDraw->bSetBlend	= 1;
+				CurrentDraw->BlendState = bState;
+#endif
 			}
 		}
 
@@ -1316,7 +1356,7 @@ void UICBINDx11RenderDevice::SetBlend(PFLAG PolyFlags)
 		// Metallicafan212:	Set the correct fake fog values
 		//					Reset fog if the XOR was Translucent or Modulated
 		//					TODO! This can be a bit glitchy in the editor, where it turns all fog into modulated fog
-		if ((GlobalShaderVars.bDoDistanceFog || GlobalShaderVars.bFadeFogValues) && (Xor & (PF_Translucent | PF_Modulated | PF_AlphaBlend | PF_Highlighted)))
+		if ((FogShaderVars.bDoDistanceFog || FogShaderVars.bFadeFogValues) && (Xor & (PF_Translucent | PF_Modulated | PF_AlphaBlend | PF_Highlighted)))
 		{
 			PFLAG Flags = (blendFlags & RELEVANT_BLEND_FLAGS);
 
@@ -1324,17 +1364,17 @@ void UICBINDx11RenderDevice::SetBlend(PFLAG PolyFlags)
 			//					Sigh.... If only they just added a alpha flag instead of reusing flags, it makes it extremely annoying
 			if (Flags & PF_Translucent && !(Flags & (PF_AlphaBlend | PF_Highlighted)))
 			{;
-				GlobalShaderVars.DistanceFogColor = GlobalShaderVars.TransFogColor;
+				FogShaderVars.DistanceFogColor = FogShaderVars.TransFogColor;
 				UpdateFogSettings();
 			}
 			else if (Flags & PF_Modulated)
 			{
-				GlobalShaderVars.DistanceFogColor = GlobalShaderVars.ModFogColor;
+				FogShaderVars.DistanceFogColor = FogShaderVars.ModFogColor;
 				UpdateFogSettings();
 			}
 			else
 			{
-				GlobalShaderVars.DistanceFogColor = GlobalShaderVars.DistanceFogFinal;
+				FogShaderVars.DistanceFogColor = FogShaderVars.DistanceFogFinal;
 				UpdateFogSettings();
 			}
 		}
@@ -1395,13 +1435,26 @@ void UICBINDx11RenderDevice::SetBlend(PFLAG PolyFlags)
 		// Metallicafan212:	Toggle between the z write and no z write states
 		if (Xor & PF_Occlude)
 		{
+#if DO_BUFFERED_DRAWS
+			CheckDrawCall();
+			CurrentDraw->bSetDState = 1;
+#endif
+
 			if ((blendFlags & PF_Occlude))
 			{
+#if !DO_BUFFERED_DRAWS
 				m_RenderContext->OMSetDepthStencilState(m_DefaultZState, 0);
+#else
+				CurrentDraw->DSState = m_DefaultZState;
+#endif
 			}
 			else
 			{
+#if !DO_BUFFERED_DRAWS
 				m_RenderContext->OMSetDepthStencilState(m_DefaultNoZState, 0);
+#else
+				CurrentDraw->DSState	= m_DefaultNoZState;
+#endif
 			}
 		}
 

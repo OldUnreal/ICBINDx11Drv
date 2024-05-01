@@ -229,6 +229,7 @@ FD3DComputeShader::FD3DComputeShader(UICBINDx11RenderDevice* InParent)
 
 }
 
+/*
 inline void CheckShader(HRESULT hr, ID3D10Blob* error)
 {
 	if (FAILED(hr))
@@ -256,6 +257,7 @@ inline void CheckShader(HRESULT hr, ID3D10Blob* error)
 	if (error != nullptr)
 		error->Release();
 }
+*/
 
 void FD3DComputeShader::Init()
 {
@@ -266,28 +268,30 @@ void FD3DComputeShader::Init()
 	// Metallicafan212:	TODO! Create the input parameters
 	//					Child shaders should track their own constant buffers....
 	// Metallicafan212:	Create the shader blobs (pixel, vertex), and the stream layout
-	ID3D10Blob* error = nullptr;
-	ID3D10Blob* csBuff = nullptr;
+	//ID3D10Blob* error = nullptr;
+	//ID3D10Blob* csBuff = nullptr;
 
+	/*
 	// Metallicafan212:	Compile the shaders
 	HRESULT hr = D3DCompileFromFile(*ComputeFile, GET_MACRO_PTR(Macros), D3D_CMP_STD_INC, appToAnsi(*ComputeFunc), "cs_5_0", 0, 0, &csBuff, &error);
 
 	CheckShader(hr, error);
+	*/
+
+	TArray<BYTE>* ShaderBytes = ParentDevice->ShaderManager->GetShaderBytes(ComputeFile, ComputeFunc, "cs_5_0", GET_MACRO_PTR(Macros), 0);
 
 	// Metallicafan212:	Get it as a compute shader
-	hr = ParentDevice->m_D3DDevice->CreateComputeShader(csBuff->GetBufferPointer(), csBuff->GetBufferSize(), nullptr, &ComputeShader);//CreateVertexShader(vsBuff->GetBufferPointer(), vsBuff->GetBufferSize(), nullptr, &VertexShader);
+	HRESULT hr = ParentDevice->m_D3DDevice->CreateComputeShader(ShaderBytes->GetData(), ShaderBytes->Num(), nullptr, &ComputeShader);//CreateVertexShader(vsBuff->GetBufferPointer(), vsBuff->GetBufferSize(), nullptr, &VertexShader);
 
 	// Metallicafan212:	IDK, do something here?
 	ParentDevice->ThrowIfFailed(hr);
-
-	SAFE_RELEASE(csBuff);
 
 	unguard;
 }
 
 void FD3DComputeShader::Bind(ID3D11DeviceContext* UseContext)
 {
-	guard(FD3DComputeShader::Bind);
+	guardSlow(FD3DComputeShader::Bind);
 
 	FD3DShader::Bind(UseContext);
 
@@ -301,7 +305,7 @@ void FD3DComputeShader::Bind(ID3D11DeviceContext* UseContext)
 	// Metallicafan212:	Bind the constant buffer as well
 	UseContext->CSSetConstantBuffers(FIRST_USER_CONSTBUFF, 1, &ShaderConstantsBuffer);
 
-	unguard;
+	unguardSlow;
 }
 
 #if USE_COMPUTE_SHADER

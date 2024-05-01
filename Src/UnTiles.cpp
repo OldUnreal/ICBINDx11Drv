@@ -5,15 +5,6 @@ void UICBINDx11RenderDevice::DrawTile(FSceneNode* Frame, FTextureInfo& Info, FLO
 {
 	guard(UICBINDx11RenderDevice::DrawTile);
 
-	// Metallicafan212:	THIS DOESN'T FUCKING WORK!
-	//					DX11 doesn't allow you to toggle the AA state!
-	//					I'm going to have to investigate some pixel shader approach, or not use MSAA!!!
-	/*
-	// Metallicafan212:	Turn off AA for tiles
-	//					TODO! Maybe make this an ini option?
-	SetRasterState(DXRS_Normal | DXRS_NoAA);
-	*/
-
 	// Metallicafan212:	Start buffering now
 	StartBuffering(BT_Tiles);
 
@@ -25,10 +16,6 @@ void UICBINDx11RenderDevice::DrawTile(FSceneNode* Frame, FTextureInfo& Info, FLO
 	if(ExtraRasterFlags & DXRS_Wireframe)
 		ExtraRasterFlags = 0;
 
-	SetRasterState(DXRS_Normal);
-
-	ExtraRasterFlags = OldFlags;
-
 	if(m_nearZRangeHackProjectionActive)
 		SetProjectionStateNoCheck(false);
 
@@ -38,7 +25,7 @@ void UICBINDx11RenderDevice::DrawTile(FSceneNode* Frame, FTextureInfo& Info, FLO
 
 	PolyFlags &= ~PF_RenderFog;
 #else
-	SetRasterState(DXRS_Normal);
+	//SetRasterState(DXRS_Normal | DXRS_NoAA);
 
 	if(m_nearZRangeHackProjectionActive)
 		SetProjectionStateNoCheck(false);
@@ -54,7 +41,7 @@ void UICBINDx11RenderDevice::DrawTile(FSceneNode* Frame, FTextureInfo& Info, FLO
 
 #if DX11_HP2
 	// Metallicafan212:	Adjust the polyflags if we're using alpha
-	if (Color.W != 0.0f)
+	if (Color.W != 0.0f && !(PolyFlags & (PF_Translucent | PF_Modulated)))
 	{
 		PolyFlags |= PF_AlphaBlend;
 	}
@@ -76,13 +63,63 @@ void UICBINDx11RenderDevice::DrawTile(FSceneNode* Frame, FTextureInfo& Info, FLO
 	Color.W = 1.0f;
 #endif
 
-	// Metallicafan212:	Needed for tiles
-	//					Basically, non-looping tiles have AF issues, so I auto clamp to reduce these issues
-	//					Fixes editor icons and the like
-	if ((abs(UL) <= Info.USize && abs(VL) <= Info.VSize))
-		PolyFlags |= PF_ClampUVs;
-	else
+	// Metallicafan212:	Calculate the UV division
+	
+	// Metallicafan212:	Debugging hack!
+	//if (Info.Texture->GetFName() == TEXT("HudBk2"))
+	//{
+	//	appDebugBreak();
+	//}
+
+	FLOAT UScale = (Info.UScale * Info.USize);
+	FLOAT VScale = (Info.VScale * Info.VSize);
+	FLOAT UDiv = 1.0f / UScale;
+	FLOAT VDiv = 1.0f / VScale;
+
+	// Metallicafan212:	Convert to floating point UVs
+	FLOAT UF	= U * UDiv;
+	FLOAT ULF	= (U + UL) * UDiv;
+	FLOAT VF	= V * VDiv;
+	FLOAT VLF	= (V + VL) * VDiv;
+
+	// Metallicafan212:	Ceil the values to make sure they don't cross into multiple squares
+	FLOAT UC	= appCeil(UF);
+	FLOAT ULC	= appCeil(ULF);
+	FLOAT VC	= appCeil(VF);
+	FLOAT VLC	= appCeil(VLF);
+	
+	// Metallicafan212:	FUCK IT! No more UV shifting, just going to test if the UVs are in 0-1
+	if (
+			//UF < 0.0f || ULF < 0.0f || VF < 0.0f || VLF < 0.0f
+		// Metallicafan212:	Does the UVs cross into a second square
+		/*||*/ 	((abs(UC - ULC) > 1.0f || abs(VC - VLC) > 1.0f))//&& (UC <= 1.0f && VC <= 1.0f))
+		)
+	{
+		// Metallicafan212:	The user might've actually wanted it to be clamped
+#if !DX11_HP2
 		PolyFlags &= ~PF_ClampUVs;
+#endif
+	}
+	else
+	{
+		PolyFlags |= PF_ClampUVs;
+
+		// Metallicafan212:	Shift UVs into the correct quadrant
+		//					TODO! Handle mirrored tiles
+		FLOAT Temp;
+
+		// Metallicafan212:	Wrap in the "X" direction if it's above one square
+		if ( abs(ULF) > 1.0f )//&& (UL - U >= 0.0f))
+		{
+			U	= std::modff(U, &Temp);
+		}
+
+		// Metallicafan212:	Wrap in the "Y" direction if it's above one square
+		if (abs(VLF) > 1.0f )//&& (VL - V >= 0.0f))//&& V < VL)
+		{
+			V	= std::modff(V, &Temp);
+		}
+	}
 
 #if DX11_HP2
 	if (PolyFlags & PF_AlphaBlend)
@@ -90,10 +127,87 @@ void UICBINDx11RenderDevice::DrawTile(FSceneNode* Frame, FTextureInfo& Info, FLO
 #endif
 
 	// Metallicafan212:	Setup blending
+	//					Per Buggie, this causes issues with tiles in his mod, so removing it
+#if 0//DX11_UT_469
+	ADJUST_PFLAGS(PolyFlags);
+#endif
 	SetBlend(PolyFlags);
 
-	//if (SceneNodeHack) //&& !bUsingRT) 
-	//if(1)
+	UBOOL bNoAF = 0;
+
+	//Adjust Z coordinate if Z range hack is active
+	//if (1)//(m_useZRangeHack)
+	if (1)
+	{
+		// Metallicafan212:	Likely the hud, hack it!
+		if ((Z >= 0.0f) && (Z < 8.0f))
+		{
+			// Metallicafan212:	TODO! There's been some glitchyness due to actor triangles drawing through hud elements, so forcing 0.5 might be needed, or maybe requesting near z range instead
+			Z = 0.5f;
+
+			// Metallicafan212:	Request no AA if we're a hud tile
+			SetRasterState(DXRS_Normal | DXRS_NoAA);
+
+			bNoAF = 1;
+		}
+		else
+		{
+			// Metallicafan212:	For normal tiles in the worldspace, request AA with depth (otherwise we get yelled at by DX11)
+			SetRasterState(DXRS_Normal);
+		}
+	}
+
+	// Metallicafan212:	Restore the extra rasterization flags
+#if DX11_HP2
+	ExtraRasterFlags = OldFlags;
+#endif
+
+	/*
+	// Metallicafan212:	Does the UVs cross into a second square
+	if (abs(UC - ULC) > 1.0f || abs(VC - VLC) > 1.0)
+	{
+		PolyFlags &= ~PF_ClampUVs;
+	}
+	else
+	{
+		PolyFlags |= PF_ClampUVs;
+
+		// Metallicafan212:	It's within a full square, move it to the right location
+		U	-= appFloor(UF) * UScale;
+		V	-= appFloor(VF) * VScale;
+	}
+	*/
+
+	/*
+	// Metallicafan212:	Tile check, see if it's beyond a full tile
+	FLOAT UF	= (UL - U) * TexInfoUMult;/// Info.USize;
+	FLOAT VF	= (VL - V) * TexInfoVMult;/// Info.VSize;
+	FLOAT UFN	= (UL + U) * TexInfoUMult;
+	FLOAT VFN	= (VL + V) * TexInfoVMult;
+
+	// Metallicafan212:	Needed for tiles
+	//					Basically, non-looping tiles have AF issues, so I auto clamp to reduce these issues
+	//					Fixes editor icons and the like
+	//					This should be disabled if the UL and VL will make it loop
+	//if ((abs(U + UL) <= Info.USize && abs(V + VL) <= Info.VSize))
+
+	// Metallicafan212:	Reversed and revised this check, as it needs to see if the UVs loop or cross a barrior
+	//if (abs(UF) > 1.0f || abs(VF) > 1.0f || std::signbit(UL) != std::signbit(U) || std::signbit(VL) != std::signbit(V))
+	{
+		PolyFlags &= ~PF_ClampUVs;
+	}
+	//else
+	//{
+	//	PolyFlags |= PF_ClampUVs;
+	//}
+	*/
+
+	SetTexture(0, &Info, PolyFlags, bNoAF);
+
+
+	FLOAT TexInfoUMult = UDiv;
+	FLOAT TexInfoVMult = VDiv;
+
 	if(SceneNodeHack)
 	{
 		if ((Frame->X != m_sceneNodeX) || (Frame->Y != m_sceneNodeY))
@@ -103,58 +217,23 @@ void UICBINDx11RenderDevice::DrawTile(FSceneNode* Frame, FTextureInfo& Info, FLO
 		}
 	}
 
-	SetTexture(0, &Info, PolyFlags);
-
 #if 0//DX11_UT_469
 	UBOOL bFontHack = (PolyFlags & (PF_NoSmooth | PF_Highlighted)) == (PF_NoSmooth | PF_Highlighted);
 #else
-	UBOOL bFontHack = (PolyFlags & PF_NoSmooth | PF_Masked) == (PolyFlags & PF_NoSmooth | PF_Masked);//(PolyFlags & (PF_NoSmooth | PF_Masked)) == (PF_NoSmooth | PF_Masked);
+	UBOOL bFontHack = ((PolyFlags & (PF_NoSmooth))); //| PF_Masked)) == (PF_NoSmooth | PF_Masked));//(PolyFlags & (PF_NoSmooth | PF_Masked)) == (PF_NoSmooth | PF_Masked);
 #endif
 
 	// Metallicafan212:	Per CacoFFF's suggestion, add/remove 0.1f * U/VSize when rendering fonts
 	FLOAT ExtraU = 0.0f;
 	FLOAT ExtraV = 0.0f;
 
-	if (bFontHack && (NumAASamples > 1 || bIsNV))
+	if ((bFontHack && ( (NumAASamples > 1 && !bSupportsForcedSampleCount) || bIsNV)))
 	{
-		//ExtraU = 0.1f / Info.USize;
-		ExtraU = TileAAUVMove / Info.USize;
-		//ExtraV = 0.1f / Info.VSize;
-		ExtraV = TileAAUVMove / Info.VSize;
+		// Metallicafan212:	Correct this based on the mip size as well
+		ExtraU = TileAAUVMove * TexInfoUMult;
+		ExtraV = TileAAUVMove * TexInfoVMult;
 	}
-	// Metallicafan212:	New approach for tiles, when using MSAA.
-	//					Based on dpjudas' approach
-	//else
 
-	/*
-	if ((NumAASamples > 1)) //|| bIsNV) && bFontHack)
-	{
-		XL	= appFloor(X + XL + 0.5f);
-		YL	= appFloor(Y + YL + 0.5f);
-		X	= appFloor(X + 0.5f);
-		Y	= appFloor(Y + 0.5f);
-		XL	= XL - X;
-		YL	= YL - Y;
-	}
-	*/
-
-	// Metallicafan212:	Use a separate centroid UV input if we have a font tile (no smooth) and have MSAA on!
-	FTileShader->bDoMSAAFontHack = 0;//bFontHack && bIsNV;//(bFontHack && (NumAASamples > 1));
-
-
-	//Adjust Z coordinate if Z range hack is active
-	//if (1)//(m_useZRangeHack)
-	if(1)
-	{
-		// Metallicafan212:	Likely the hud, hack it!
-		if ((Z >= 0.5f) && (Z < 8.0f))
-		{
-			// Metallicafan212:	TODO! There's been some glitchyness due to actor triangles drawing through hud elements, so forcing 0.5 might be needed, or maybe requesting near z range instead
-			Z = 0.5f;
-			//SetProjectionStateNoCheck(false);
-			//Z = (((Z - 0.5f) / 7.5f) * 2.0f) + 2.0f; 
-		}
-	}
 
 	// Metallicafan212:	Bind the tile shader
 	FTileShader->Bind(m_RenderContext);
@@ -201,16 +280,11 @@ void UICBINDx11RenderDevice::DrawTile(FSceneNode* Frame, FTextureInfo& Info, FLO
 		Color = FPlane(1.f, 1.f, 1.f, 1.f);
 	}
 
-
 	// Metallicafan212:	Selection testing!!!!
 	if (m_HitData != nullptr)
 		Color = CurrentHitColor;
 
-	//LockVertexBuffer(6 * sizeof(FD3DVert));
 	LockVertAndIndexBuffer(6);
-
-	FLOAT TexInfoUMult = BoundTextures[0].UMult;
-	FLOAT TexInfoVMult = BoundTextures[0].VMult;
 
 	FLOAT SU1			= (U * TexInfoUMult)		+ ExtraU;
 	FLOAT SU2			= ((U + UL) * TexInfoUMult) + ExtraU;
@@ -260,13 +334,7 @@ void UICBINDx11RenderDevice::DrawTile(FSceneNode* Frame, FTextureInfo& Info, FLO
 	m_VertexBuff[5].U		= SU1;
 	m_VertexBuff[5].V		= SV2;
 
-	//UnlockVertexBuffer();
-	//UnlockBuffers();
-
-	// Metallicafan212:	Now draw
-	//m_RenderContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-
-	AdvanceVertPos();//6);
+	AdvanceVertPos();
 
 
 	unguard;

@@ -1,40 +1,20 @@
 ﻿#include "ICBINDx11Drv.h"
 
-#if !DX11_HP2
-UBOOL GWineAndDine = 0;
-#endif
-
 // Metallicafan212:	TODO!
 IMPLEMENT_CLASS(UICBINDx11RenderDevice);
 IMPLEMENT_PACKAGE(ICBINDx11Drv);
+
+UBOOL UICBINDx11RenderDevice::bSetupIValArray = 0;
+INT	  UICBINDx11RenderDevice::IndexValueArray[IBUFF_SIZE];
 
 void UICBINDx11RenderDevice::SetupDevice()
 {
 	guard(UICBINDx11RenderDevice::SetupDevice);
 
-	// Metallicafan212:	Detect wine
+	// Metallicafan212: Detect windows version and wine on non-HP2 engines
 #if !DX11_HP2
-
-	// Metallicafan212:	Check if wine
-	typedef const char* (CDECL* pwine_get_version)(void);
-
-	pwine_get_version func = nullptr;
-
-	HMODULE hntDLL = GetModuleHandle(TEXT("ntdll.dll"));
-
-	if (hntDLL != nullptr)
-	{
-		func = (pwine_get_version)GetProcAddress(hntDLL, "wine_get_version");
-
-		if (func != nullptr)
-		{
-			GWineAndDine = 1;
-
-			debugf(NAME_Init, TEXT("DX11: Detected, Wine/Proton Windows emulator. WARNING! Wine/Proton emulation is not perfect!"));
-			debugf(NAME_Init, TEXT("DX11: Wine/Proton version: %s"), appFromAnsi(func()));
-		}
-	}
-
+	// Metallicafan212:	TODO!!!!! This will NOT work since windows will always report a lower OS number to apps with a older manifest....
+	SetupWindowsVersionCheck();
 #endif
 
 
@@ -106,14 +86,15 @@ void UICBINDx11RenderDevice::SetupDevice()
 	SAFE_RELEASE(m_MSAAResolveSRV);
 	SAFE_RELEASE(m_MSAAResolveTex);
 
-	//SAFE_RELEASE(m_ScreenOpacityTex);
-	//SAFE_RELEASE(m_ScreenOpacityRTSRV);
-	//SAFE_RELEASE(m_D3DScreenOpacityRTV);
 
 	// Metallicafan212:	Depth stencil target
 	SAFE_RELEASE(m_ScreenDSTex);
 	SAFE_RELEASE(m_D3DScreenDSV);
 	SAFE_RELEASE(m_ScreenDTSRV);
+
+	// Metallicafan212:	Selection version
+	SAFE_RELEASE(m_SelectionDSTex);
+	SAFE_RELEASE(m_SelectionDSV);
 
 
 	// Metallicafan212:	TODO! Do we need to make shaders each time?
@@ -123,7 +104,8 @@ void UICBINDx11RenderDevice::SetupDevice()
 	SAFE_DELETE(FMeshShader);
 	SAFE_DELETE(FSurfShader);
 	SAFE_DELETE(FLineShader);
-	SAFE_DELETE(FMSAAShader);
+	//SAFE_DELETE(FMSAAShader);
+	SAFE_DELETE(ShaderManager);
 #if P8_COMPUTE_SHADER
 	SAFE_DELETE(FP8ToRGBAShader);
 #endif
@@ -144,6 +126,7 @@ void UICBINDx11RenderDevice::SetupDevice()
 	// Metallicafan212:	Depth states for PF_Occlude
 	SAFE_RELEASE(m_DefaultZState);
 	SAFE_RELEASE(m_DefaultNoZState);
+	SAFE_RELEASE(m_DefaultNoZWriteState);
 
 	// Metallicafan212:	Clear the mode, if the device context is already existing!
 	if (m_D3DDeviceContext != nullptr)
@@ -153,6 +136,11 @@ void UICBINDx11RenderDevice::SetupDevice()
 	}
 
 	SAFE_RELEASE(m_D3DDeviceContext);
+
+	// Metallicafan212:	Always reset the render context, so we don't have a dangling nullptr
+	m_RenderContext = nullptr;
+
+	SAFE_RELEASE(m_D3DDevice1);
 	SAFE_RELEASE(m_D3DDevice);
 	SAFE_RELEASE(m_D3DDeferredContext);
 	SAFE_RELEASE(m_D3DCommandList);
@@ -161,13 +149,17 @@ void UICBINDx11RenderDevice::SetupDevice()
 	SAFE_RELEASE(GlobalDistFogBuffer);
 	SAFE_RELEASE(GlobalPolyflagsBuffer);
 
+	SAFE_RELEASE(BoundTexturesBuffer);
+
 	// Metallicafan212:	Set the raster state to an invalid value
 	CurrentRasterState = DXRS_MAX;
 
 	// Metallicafan212:	Init DX11
 	//					We want to use feature level 11_1 for compute shaders
-	D3D_FEATURE_LEVEL FLList[7] = 
+	D3D_FEATURE_LEVEL FLList[9] = 
 	{ 
+		D3D_FEATURE_LEVEL_12_1,
+		D3D_FEATURE_LEVEL_12_0,
 		D3D_FEATURE_LEVEL_11_1,
 		D3D_FEATURE_LEVEL_11_0,
 		D3D_FEATURE_LEVEL_10_1,
@@ -181,41 +173,47 @@ void UICBINDx11RenderDevice::SetupDevice()
 
 	D3D_FEATURE_LEVEL* FLPtr = &FLList[0];
 
-	// Metallicafan212:	Make it single threaded for more performance?
+	// Metallicafan212:	TODO! Find a work around that allows for actually checking for the direct windows version....
+	//					I might have to query cmd.....
+#if DX11_HP2 || DX11_UT_469
+
+	// Metallicafan212:	In 469, only do this if compiled for e
+#if DX11_UT_469
+	if (!c_strcmp(ENGINE_REVISION, TEXT("d")))
+#endif
+	{
+		if (!GWin10)
+		{
+			// Metallicafan212:	Don't attempt to use feature levels 12_1 and 12_0
+			FLPtr	+= 2;
+			FLCount -= 2;
+		}
+
+		if (!GWin81)
+		{
+			// Metallicafan212:	Start with 11_0
+			FLPtr++;
+			FLCount--;
+		}
+	}
+
+#endif
+
+	// Metallicafan212:	On my system, the multithreaded supported device runs ever so slightly faster, for no reason
 	UINT Flags =	D3D11_CREATE_DEVICE_BGRA_SUPPORT
-	//					TODO! Reeval if we need to use child threads in the future
-				|	D3D11_CREATE_DEVICE_SINGLETHREADED
+				| (bUseMultiThreadedDevice ? 0 : D3D11_CREATE_DEVICE_SINGLETHREADED)
+				//|	D3D11_CREATE_DEVICE_SINGLETHREADED
 				|	(!bDisableSDKLayers ? D3D11_CREATE_DEVICE_DEBUG : 0)
 				;
 	
 	GLog->Logf(TEXT("DX11: Creating device with the maximum feature level"));
 
+	// Metallicafan212:	Don't allow for deferred rendering if we're not using multi-threading
+	if(!bUseMultiThreadedDevice)
+		bUseDeferredRendering = 0;
+
 MAKE_DEVICE:
-	HRESULT hr = S_OK;
-
-	// Metallicafan212:	TODO! May not even support this lol
-	//					It probably wouldn't even run any better, and you need a ID3D12Device
-	/*
-	if (bUseD3D11On12)
-	{
-		hr = D3D11On12CreateDevice(nullptr, Flags, FLPtr, FLCount, nullptr, 0, 0, &m_D3DDevice, &m_D3DDeviceContext, &m_FeatureLevel);
-
-		if (FAILED(hr))
-		{
-			// Metallicafan212:	Not supported? Jump down
-			goto NORMAL_DX11;
-		}
-		else
-		{
-			GLog->Logf(TEXT("DX11: Created device using D3D11On12"));
-		}
-	}
-	else
-	*/
-	{
-	//NORMAL_DX11:
-		hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, Flags, FLPtr, FLCount, D3D11_SDK_VERSION, &m_D3DDevice, &m_FeatureLevel, &m_D3DDeviceContext);
-	}
+	HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, Flags, FLPtr, FLCount, D3D11_SDK_VERSION, &m_D3DDevice, &m_FeatureLevel, &m_D3DDeviceContext);
 
 	// Metallicafan212:	Check if it failed due to the debug layer
 	if (FAILED(hr) && (Flags & D3D11_CREATE_DEVICE_DEBUG))
@@ -224,7 +222,7 @@ MAKE_DEVICE:
 		Flags &= ~D3D11_CREATE_DEVICE_DEBUG;
 
 		// Metallicafan212:	Don't try again on the next run
-		bDisableSDKLayers = 0;
+		bDisableSDKLayers = 1;
 
 		goto MAKE_DEVICE;
 	}
@@ -247,11 +245,44 @@ MAKE_DEVICE:
 
 	ThrowIfFailed(hr);
 
+	// Metallicafan212:	Initialize the geo shader bool
+	//					Wine/proton does not like my geo shader, so we ignore it (for now)
+	//bUseGeoShaders = !GWineAndDine;
+
+	// Metallicafan212:	Fix broken use of geo shaders
+	bUseGeoShaders				= 1;
+	bSupportsForcedSampleCount	= 0;
+
+	// Metallicafan212:	When using wine, force use of the precompiled shaders!
+	if (GWineAndDine)
+	{
+		bUsePrecompiledShaders = 1;
+	}
+
+	// Metallicafan212:	Get the windows 8+ specific device
+	m_D3DDevice1 = nullptr;
+	hr = m_D3DDevice->QueryInterface(__uuidof(m_D3DDevice1), (void**)&m_D3DDevice1);
+
 	// Metallicafan212:	Log the feature level
 	const TCHAR* FLStr = nullptr;
 
 	switch (m_FeatureLevel)
 	{
+		// Metallicafan212:	Level 12_1 explicitly supports it, anything else has to be queried
+		case D3D_FEATURE_LEVEL_12_1:
+		{
+			FLStr = TEXT("12.1");
+			if(bUseForcedSampleCount)
+				bSupportsForcedSampleCount = 1;
+			break;
+		}
+
+		case D3D_FEATURE_LEVEL_12_0:
+		{
+			FLStr = TEXT("12.0");
+			break;
+		}
+
 		case D3D_FEATURE_LEVEL_11_1:
 		{
 			FLStr = TEXT("11.1");
@@ -295,51 +326,126 @@ MAKE_DEVICE:
 		}
 	}
 
+	// Metallicafan212:	Figure out the vertex/pixel/geo shader versions
+	//					TODO! Could combine with the previous switch, but then I would have to reformat this
+	switch (m_FeatureLevel)
+	{
+		// Metallicafan212:	Directx 11 doesn't support shader model 5.1, even though the feature level does
+		case D3D_FEATURE_LEVEL_12_1:
+		case D3D_FEATURE_LEVEL_12_0:
+		case D3D_FEATURE_LEVEL_11_1:
+		case D3D_FEATURE_LEVEL_11_0:
+		{
+			MaxVSLevel		= "vs_5_0";
+			MaxPSLevel		= "ps_5_0";
+			MaxGSLevel		= "gs_5_0";
+			break;
+		}
+
+		case D3D_FEATURE_LEVEL_10_1:
+		{
+			MaxVSLevel		= "vs_4_1";
+			MaxPSLevel		= "ps_4_1";
+			MaxGSLevel		= "gs_4_1";
+			break;
+		}
+
+		case D3D_FEATURE_LEVEL_10_0:
+		{
+			MaxVSLevel		= "vs_4_0";
+			MaxPSLevel		= "ps_4_0";
+			MaxGSLevel		= "gs_4_0";
+			break;
+		}
+
+		// Metallicafan212:	9.3 doesn't allow for pixel shader 3.0 but allows for 4.0?????
+		//					Nevermind, turns out my shaders can't compile for this target since integer inputs aren't allowed
+		/*
+		case D3D_FEATURE_LEVEL_9_3:
+		{
+			MaxVSLevel		= "vs_4_0_level_9_3";
+			MaxPSLevel		= "ps_4_0_level_9_3";
+			MaxGSLevel		= "";
+			bUseGeoShaders	= 0;
+			break;
+		}
+		*/
+
+		// Metallicafan212:	This doesn't work at all, and only indicates support of 2_x NOT 3_0
+		/*
+		case D3D_FEATURE_LEVEL_9_3:
+		{
+			MaxVSLevel		= "vs_3_0";
+			MaxPSLevel		= "ps_3_0";
+			MaxGSLevel		= "";
+			bUseGeoShaders	= 0;
+			break;
+		}
+		*/
+
+		case D3D_FEATURE_LEVEL_9_3:
+		case D3D_FEATURE_LEVEL_9_2:
+		case D3D_FEATURE_LEVEL_9_1:
+		default:
+		{
+			appErrorf(TEXT("Unsupported feature level %s"), FLStr);
+		}
+	}
+
 	m_RenderContext = m_D3DDeviceContext;
 
-	/*
-	if (m_FeatureLevel >= D3D_FEATURE_LEVEL_11_0)
+	if (bUseDeferredRendering && m_FeatureLevel >= D3D_FEATURE_LEVEL_11_0)
 	{
-		// Metallicafan212:	Create a deferred context and command list
+		// Metallicafan212:	Create a deferred context (if the user has it enabled)
 		hr = m_D3DDevice->CreateDeferredContext(0, &m_D3DDeferredContext);
 
 		if (SUCCEEDED(hr))
 		{
 			GLog->Logf(TEXT("DX11: Using deferred rendering! This is expirimental!"));
 		}
+		else
+		{
+			bUseDeferredRendering = 0;
+		}
 	}
-	*/
 
 	GLog->Logf(TEXT("DX11: Using feature level %s"), FLStr);
+
+	// Metallicafan212:	Check for ForcedSampleCount support
+	if (!bSupportsForcedSampleCount && bUseForcedSampleCount)
+	{
+		D3D11_FEATURE_DATA_D3D11_OPTIONS Options;
+
+		hr = m_D3DDevice->CheckFeatureSupport(D3D11_FEATURE_D3D11_OPTIONS, &Options, sizeof(D3D11_FEATURE_DATA_D3D11_OPTIONS));
+
+		if (SUCCEEDED(hr))
+		{
+			bSupportsForcedSampleCount = Options.MultisampleRTVWithForcedSampleCountOne;
+
+			if (!bSupportsForcedSampleCount)
+			{
+				GLog->Logf(TEXT("DX11: Device does not support multisample render targets with forced sample count of one. Tiles will be rendered WITH MSAA"));
+			}
+		}
+		else
+		{
+			GLog->Logf(TEXT("DX11: Faild to query for DirectX 11.1 specific features"));
+		}
+	}
+
+	if (bSupportsForcedSampleCount)
+	{
+		GLog->Logf(TEXT("DX11: Device supports multisample render targets with forced sample count of one. Tiles will be rendered without MSAA"));
+	}
+	else
+	{
+		// Metallicafan212:	Reset if needed
+		bUseForcedSampleCount = 0;
+	}
 
 	// Metallicafan212:	Make the query
 	D3D11_QUERY_DESC qDesc = { D3D11_QUERY_EVENT, 0 };
 	m_D3DDevice->CreateQuery(&qDesc, &m_D3DQuery);
-
-	GLog->Logf(TEXT("DX11: Creating shaders"));
-
-	// Metallicafan212:	Make the shader
-	FTileShader			= new FD3DTileShader(this);
-
-	FGenShader			= new FD3DGenericShader(this);
-
-	FResScaleShader		= new FD3DResScalingShader(this);
-
-#if USE_COMPUTE_SHADER
-	FMshLghtCompShader	= new FD3DLghtMshCompShader(this);
-#endif
-
-	FMeshShader			= new FD3DMeshShader(this);
-
-	FSurfShader			= new FD3DSurfShader(this);
-
-	FLineShader			= new FD3DLineShader(this);
-
-	FMSAAShader			= new FD3DMSAAShader(this);
-
-#if P8_COMPUTE_SHADER
-	FP8ToRGBAShader		= new FD3DP8ToRGBAShader(this);
-#endif
 
 	// Metallicafan212:	Setup the debug info
 #if 1//_DEBUG
@@ -458,7 +564,7 @@ MAKE_DEVICE:
 	SetRasterState(DXRS_Normal);
 
 	// Metallicafan212:	Reset the shader state
-	GlobalShaderVars	= FGlobalShaderVars();
+	FogShaderVars		= FFogShaderVars();
 	FrameShaderVars		= FFrameShaderVars();
 
 	// Metallicafan212:	Recreate the constant buffer as well
@@ -475,6 +581,8 @@ MAKE_DEVICE:
 	m_RenderContext->PSSetConstantBuffers(0, 1, &FrameConstantsBuffer);
 	m_RenderContext->CSSetConstantBuffers(0, 1, &FrameConstantsBuffer);
 
+	// Metallicafan212:	Don't even create it if we're not in HP2
+#if DX11_HP2
 	// Metallicafan212:	Now create one for the distance fog settings
 	//D3D11_BUFFER_DESC DistConst = { sizeof(FDistFogVars), D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER, 0, 0, 0 };
 	D3D11_BUFFER_DESC DistConst = { sizeof(FDistFogVars), D3D11_USAGE_DYNAMIC, D3D11_BIND_CONSTANT_BUFFER, D3D11_CPU_ACCESS_WRITE, 0, 0 };
@@ -486,6 +594,7 @@ MAKE_DEVICE:
 	m_RenderContext->GSSetConstantBuffers(1, 1, &GlobalDistFogBuffer);
 	m_RenderContext->PSSetConstantBuffers(1, 1, &GlobalDistFogBuffer);
 	m_RenderContext->CSSetConstantBuffers(1, 1, &GlobalDistFogBuffer);
+#endif
 
 	// Metallicafan212:	And now the dynamic polyflags buffer
 	D3D11_BUFFER_DESC PolyConst = { sizeof(FPolyflagVars), D3D11_USAGE_DYNAMIC, D3D11_BIND_CONSTANT_BUFFER, D3D11_CPU_ACCESS_WRITE, 0, 0 };
@@ -498,10 +607,28 @@ MAKE_DEVICE:
 	m_RenderContext->PSSetConstantBuffers(2, 1, &GlobalPolyflagsBuffer);
 	m_RenderContext->CSSetConstantBuffers(2, 1, &GlobalPolyflagsBuffer);
 
+	// Metallicafan212:	Setup the buffer for the bound textures
+	D3D11_BUFFER_DESC TexConst = { sizeof(FBoundTextures), D3D11_USAGE_DYNAMIC, D3D11_BIND_CONSTANT_BUFFER, D3D11_CPU_ACCESS_WRITE, 0, 0 };
+	hr = m_D3DDevice->CreateBuffer(&TexConst, nullptr, &BoundTexturesBuffer);
+
+	ThrowIfFailed(hr);
+
+	m_RenderContext->VSSetConstantBuffers(3, 1, &BoundTexturesBuffer);
+	m_RenderContext->GSSetConstantBuffers(3, 1, &BoundTexturesBuffer);
+	m_RenderContext->PSSetConstantBuffers(3, 1, &BoundTexturesBuffer);
+	m_RenderContext->CSSetConstantBuffers(3, 1, &BoundTexturesBuffer);
+
 	// Metallicafan212:	Setup the pre-defined index values array
-	for (INT i = 0; i < IBUFF_SIZE; i++)
+	if (!bSetupIValArray)
 	{
-		IndexValueArray[i] = i;
+		for (INT i = 0; i < IBUFF_SIZE; i++)
+		{
+			IndexValueArray[i] = i;
+		}
+
+		// Metallicafan212:	Mark it as initialized
+		//					TODO! Find some way to generate this as a static array via preprocessor
+		bSetupIValArray = 1;
 	}
 
 	// Metallicafan212:	If we're using deferred rendering, we HAVE to map with discard first!!!!
@@ -510,6 +637,42 @@ MAKE_DEVICE:
 		LockVertAndIndexBuffer(0, 0, 0);
 		UnlockBuffers();
 	}
+
+	unguard;
+}
+
+void UICBINDx11RenderDevice::InitShaders()
+{
+	guard(UICBINDx11RenderDevice::InitShaders);
+
+#define MAKE_SHADER(Var, cls) \
+		if(Var == nullptr) \
+		{	\
+			GLog->Logf(TEXT("DX11: Making %s"), TEXT(#Var)); \
+			Var = new cls(this); \
+		}
+
+	// Metallicafan212:	Should probably rename this macro
+	MAKE_SHADER(ShaderManager,		FShaderManager);
+
+	MAKE_SHADER(FTileShader,		FD3DTileShader);
+	MAKE_SHADER(FGenShader,			FD3DGenericShader);
+	MAKE_SHADER(FResScaleShader,	FD3DResScalingShader);
+#if USE_COMPUTE_SHADER
+	MAKE_SHADER(FMshLghtCompShader,	FD3DLghtMshCompShader);
+#endif
+	MAKE_SHADER(FMeshShader,		FD3DMeshShader);
+	MAKE_SHADER(FSurfShader,		FD3DSurfShader);
+	MAKE_SHADER(FLineShader,		FD3DLineShader);
+	//MAKE_SHADER(FMSAAShader,		FD3DMSAAShader);
+#if P8_COMPUTE_SHADER
+	MAKE_SHADER(FP8ToRGBAShader,	FD3DP8ToRGBAShader);
+#endif
+
+#undef MAKE_SHADER
+
+	// Metallicafan212:	See if the cache needs to be written
+	ShaderManager->SaveCache();
 
 	unguard;
 }
@@ -530,6 +693,11 @@ void UICBINDx11RenderDevice::SetRasterState(DWORD State)
 	// Metallicafan212:	Add on the extra raster flags
 	State |= ExtraRasterFlags;
 
+	// Metallicafan212:	If we don't have a windows 8 device, don't allow for the no AA option
+	//					Also don't request it if we aren't even using AA, there's no point to
+	if(m_D3DDevice1 == nullptr || !bUseForcedSampleCount || NumAASamples <= 1)
+		State &= ~(DXRS_NoAA);
+
 	if (State != CurrentRasterState)
 	{
 		// Metallicafan212:	End whatever rendering we're doing right now!
@@ -537,7 +705,7 @@ void UICBINDx11RenderDevice::SetRasterState(DWORD State)
 
 		// Metallicafan212:	Find what needs to be added on to make it, if it doesn't exist yet
 #if !USE_UNODERED_MAP_EVERYWHERE
-		ID3D11RasterizerState* m_s = RasterMap.FindRef(State);
+		ID3D11RasterizerState1* m_s = RasterMap.FindRef(State);
 #else
 		auto f = RasterMap.find(State);
 
@@ -546,58 +714,132 @@ void UICBINDx11RenderDevice::SetRasterState(DWORD State)
 
 		if (m_s == nullptr)
 		{
-			CD3D11_RASTERIZER_DESC Desc(D3D11_DEFAULT);
-
-			// Metallicafan212: We want no backface culling
-			Desc.CullMode					= D3D11_CULL_NONE;
-
-			// Metallicafan212:	These are defaults
-			//Desc.DepthBias					= 0;
-			//Desc.DepthBiasClamp				= 0.0f;
-			//Desc.DepthClipEnable			= TRUE;
-			//Desc.FrontCounterClockwise		= FALSE;
-			//Desc.ScissorEnable				= FALSE;
-
-			// Metallicafan212:	Now check the flags
-			if (State & DXRS_Wireframe)
+			if (m_D3DDevice1 != nullptr)
 			{
-				Desc.FillMode = D3D11_FILL_WIREFRAME;
-			}
-			// Metallicafan212:	This is default
-			/*
-			else
-			{
-				Desc.FillMode = D3D11_FILL_SOLID;
-			}
-			*/
+				CD3D11_RASTERIZER_DESC1 Desc(D3D11_DEFAULT);
 
-			// Metallicafan212:	TODO!!!! This does NOTHING in real DX11 modes!!!
-			if (State & DXRS_NoAA)
-			{
-				Desc.AntialiasedLineEnable	= FALSE;
-				Desc.MultisampleEnable		= FALSE;
-			}
-			else
-			{
-				Desc.AntialiasedLineEnable	= TRUE;
-				Desc.MultisampleEnable		= TRUE;
-			}
+				// Metallicafan212: We want no backface culling
+				Desc.CullMode					= D3D11_CULL_NONE;
 
-			HRESULT hr = m_D3DDevice->CreateRasterizerState(&Desc, &m_s);
+				// Metallicafan212:	Now check the flags
+				if (State & DXRS_Wireframe)
+				{
+					Desc.FillMode = D3D11_FILL_WIREFRAME;
+				}
 
-			ThrowIfFailed(hr);
+				// Metallicafan212:	TODO!!!! This does NOTHING in real DX11 modes!!!
+				if (State & DXRS_NoAA)
+				{
+					Desc.AntialiasedLineEnable	= FALSE;
+					Desc.MultisampleEnable		= FALSE;
+					Desc.ForcedSampleCount		= 1;
+				}
+				else
+				{
+					Desc.AntialiasedLineEnable	= TRUE;
+					Desc.MultisampleEnable		= TRUE;
+					Desc.ForcedSampleCount		= 0;
+				}
 
-			// Metallicafan212:	Now set it on the map
+				HRESULT hr = m_D3DDevice1->CreateRasterizerState1(&Desc, (ID3D11RasterizerState1**)&m_s);
+
+				ThrowIfFailed(hr);
+
+				// Metallicafan212:	Now set it on the map
 #if !USE_UNODERED_MAP_EVERYWHERE
-			RasterMap.Set(State, m_s);
+				RasterMap.Set(State, m_s);
 #else
-			RasterMap[State] = m_s;
+				RasterMap[State] = m_s;
 #endif
+			}
+			else
+			{
+				CD3D11_RASTERIZER_DESC Desc(D3D11_DEFAULT);
+
+				// Metallicafan212: We want no backface culling
+				Desc.CullMode					= D3D11_CULL_NONE;
+
+				// Metallicafan212:	Now check the flags
+				if (State & DXRS_Wireframe)
+				{
+					Desc.FillMode = D3D11_FILL_WIREFRAME;
+				}
+
+				// Metallicafan212:	TODO!!!! This does NOTHING in real DX11 modes!!!
+				if (State & DXRS_NoAA)
+				{
+					Desc.AntialiasedLineEnable	= FALSE;
+					Desc.MultisampleEnable		= FALSE;
+				}
+				else
+				{
+					Desc.AntialiasedLineEnable	= TRUE;
+					Desc.MultisampleEnable		= TRUE;
+				}
+
+				HRESULT hr = m_D3DDevice1->CreateRasterizerState(&Desc, &m_s);
+
+				ThrowIfFailed(hr);
+
+				// Metallicafan212:	Now set it on the map
+#if !USE_UNODERED_MAP_EVERYWHERE
+				RasterMap.Set(State, m_s);
+#else
+				RasterMap[State] = m_s;
+#endif
+			}
 		}
 
 		// Metallicafan212:	Set it
-		if(m_s != nullptr)
+		if (m_s != nullptr)
+		{
+			ID3D11DepthStencilView* DSV = nullptr;
+			ID3D11RenderTargetView* RTV = nullptr;
+
+			UBOOL bNoDepth = (State & DXRS_NoAA) == DXRS_NoAA;
+
+			// Metallicafan212:	Set the right RTV and DTV based on what rendering we're currently doing
+			if (BoundRT != nullptr)
+			{
+				RTV = BoundRT->RTView.Get();
+				DSV = BoundRT->DTView.Get();
+			}
+			else if (FrameShaderVars.bDoSelection)
+			{
+				RTV = m_BackBuffRT;
+				DSV = m_SelectionDSV;
+			}
+			else
+			{
+				RTV = m_D3DScreenRTV;
+				DSV = m_D3DScreenDSV;
+			}
+
+			if (bNoDepth)
+			{
+				DSV = nullptr;
+			}
+
+			// Metallicafan212:	We have to set the render target here, so we can clear the depth target (I wish it was a separate function...)
+			m_RenderContext->OMSetRenderTargets(1, &RTV, DSV);
+
+			// Metallicafan212:	Now disable Z writing, as we can't have it on at all....
+			if (!bNoDepth && (CurrentPolyFlags & PF_Occlude))
+			{
+				m_RenderContext->OMSetDepthStencilState(m_DefaultZState, 0);
+			}
+			// Metallicafan212:	We have to keep around a state for JUST turning off z checking
+			else if (bNoDepth)
+			{
+				m_RenderContext->OMSetDepthStencilState(m_DefaultNoZWriteState, 0);
+			}
+			else
+			{
+				m_RenderContext->OMSetDepthStencilState(m_DefaultNoZState, 0);
+			}
+
 			m_RenderContext->RSSetState(m_s);
+		}
 
 		CurrentRasterState = State;
 	}
@@ -625,14 +867,12 @@ UBOOL UICBINDx11RenderDevice::Init(UViewport* InViewport, INT NewX, INT NewY, IN
 	m_MSAAResolveSRV	= nullptr;
 	m_MSAAResolveTex	= nullptr;
 
-	//m_ScreenOpacityTex		= nullptr;
-	//m_D3DScreenOpacityRTV	= nullptr;
-	//m_ScreenOpacityRTSRV	= nullptr;
-
 	// Metallicafan212:	Depth stencil target stuff
 	m_ScreenDSTex		= nullptr;
 	m_ScreenDTSRV		= nullptr;
 	m_D3DScreenDSV		= nullptr;
+	m_SelectionDSTex	= nullptr;
+	m_SelectionDSV		= nullptr;
 
 #if DX11_HP2
 	// Metallicafan212:	HP2 specific on-screen string drawing
@@ -649,7 +889,8 @@ UBOOL UICBINDx11RenderDevice::Init(UViewport* InViewport, INT NewX, INT NewY, IN
 	FTileShader			= nullptr;
 	FGenShader			= nullptr;
 	FResScaleShader		= nullptr;
-	FMSAAShader			= nullptr;
+	//FMSAAShader			= nullptr;
+	ShaderManager		= nullptr;
 #if P8_COMPUTE_SHADER
 	FP8ToRGBAShader		= nullptr;
 #endif
@@ -657,17 +898,15 @@ UBOOL UICBINDx11RenderDevice::Init(UViewport* InViewport, INT NewX, INT NewY, IN
 	FMshLghtCompShader	= nullptr;
 #endif
 
-	PaletteTexture		= nullptr;
-	PaletteSRV = nullptr;
-
 	// Metallicafan212:	Blank tex, resource, and samplers for defaults
 	BlankTexture		= nullptr;
 	BlankResourceView	= nullptr;
 	BlankSampler		= nullptr;
 
 	// Metallicafan212:	Raster states for turning on and off occlusion
-	m_DefaultZState		= nullptr;
-	m_DefaultNoZState	= nullptr;
+	m_DefaultZState			= nullptr;
+	m_DefaultNoZState		= nullptr;
+	m_DefaultNoZWriteState	= nullptr;
 
 	ScreenSamp			= nullptr;
 
@@ -690,6 +929,9 @@ UBOOL UICBINDx11RenderDevice::Init(UViewport* InViewport, INT NewX, INT NewY, IN
 	FrameConstantsBuffer	= nullptr;
 	GlobalDistFogBuffer		= nullptr;
 	GlobalPolyflagsBuffer	= nullptr;
+	BoundTexturesBuffer		= nullptr;
+
+	bWriteTexturesBuffer	= 0;
 	
 
 	Viewport			= InViewport;
@@ -982,15 +1224,16 @@ void UICBINDx11RenderDevice::SetupResources()
 	SAFE_RELEASE(m_D3DScreenDSV);
 	SAFE_RELEASE(m_ScreenDTSRV);
 
+	// Metallicafan212:	Selection versions
+	SAFE_RELEASE(m_SelectionDSTex);
+	SAFE_RELEASE(m_SelectionDSV);
+
 #if DX11_HP2
 	// Metallicafan212:	TODO! HP2 specific
 	SAFE_RELEASE(m_D2DRT);
 	SAFE_RELEASE(m_DXGISurf);
 	SAFE_RELEASE(m_TextParams);
 #endif
-
-	SAFE_RELEASE(PaletteSRV);
-	SAFE_RELEASE(PaletteTexture);
 
 	// Metallicafan212:	No bind texture/sampler
 	SAFE_RELEASE(BlankTexture);
@@ -1000,6 +1243,7 @@ void UICBINDx11RenderDevice::SetupResources()
 	// Metallicafan212:	Depth stencil states
 	SAFE_RELEASE(m_DefaultZState);
 	SAFE_RELEASE(m_DefaultNoZState);
+	SAFE_RELEASE(m_DefaultNoZWriteState);
 
 	// Metallicafan212:	Recreate the texture samplers
 	FlushTextureSamplers();
@@ -1042,6 +1286,15 @@ void UICBINDx11RenderDevice::SetupResources()
 		debugf(TEXT("Compiled                : %s"),	COMPILED_AT);
 		//debugf(TEXT("D3D adapter driver      : %s"), appFromAnsi(ident.Driver));
 		debugf(TEXT("D3D adapter description : %s"),	AdDesc.Description);
+
+		// Metallicafan212:	Copy the description
+		GPUDesc = AdDesc.Description;
+
+		// Metallicafan212:	Now get the version number of the driver
+		hr = dxgiAdapter->CheckInterfaceSupport(__uuidof(IDXGIDevice), &GPUDriverVer);
+
+		ThrowIfFailed(hr);
+		
 		// Metallicafan212:	TODO! In 32bit mode, use %lu instead
 #if UNREAL32
 		debugf(TEXT("D3D adapter VRam        : %dGB (%luMB)"), appRound((AdDesc.DedicatedVideoMemory / 1073741824.0)), (AdDesc.DedicatedVideoMemory / 1048576));
@@ -1068,48 +1321,61 @@ void UICBINDx11RenderDevice::SetupResources()
 			debugf(TEXT("D3D adapter vendor      : Intel"));
 			bIsIntel = 1;
 		}
+		else
+		{
+			debugf(TEXT("D3D adapter vendor      : Unknown (%0x10)"), AdDesc.VendorId);
+		}
 
 		// Metallicafan212:	If to use the new Windows 10 modes. I only test if we're actually running on 10
 		//					!GIsEditor is here because using the tearing mode does something fucky in DWM, changing the window in such a way that normal non-DX11 renderers can't draw to it
 		//					I need to analyse and see what exactly it's modifying about the window and reverse that change
 		bAllowTearing = (!GIsEditor
+		
+		// Metallicafan212:	This WONT work on UT469, since there's no app manifest
+		// 
+		// 
+		// Metallicafan212:	2024, I added simple windows version checking to the driver for non-HP2 targets
+		//					TODO! Enable for UT469e!
 #if DX11_HP2
 			&& GWin10
 #endif
 			);
 
-
-		IDXGIFactory5* dxgiFactory5 = nullptr;
-		hr = dxgiAdapter->GetParent(IID_PPV_ARGS(&dxgiFactory5));
-
-		IDXGIFactory2* dxgiFactory;
-
-		if (FAILED(hr))
-		{
-			// Metallicafan212:	Get the DXGI factory2 only
-			bAllowTearing = 0;
-		}
-		else
-		{
-			// Metallicafan212:	See if it supports the effect
-			BOOL bSupportsTearing = 0;
-
-			hr = dxgiFactory5->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING, &bSupportsTearing, sizeof(BOOL));
-
-			if (FAILED(hr) || !bSupportsTearing)
-			{
-				if (FAILED(hr))
-				{
-					GLog->Logf(TEXT("DX11: Device does not support tearing"));
-				}
-				bAllowTearing = 0;
-			}
-
-		}
-
+		// Metallicafan212:	Don't even test it if it's not able to be grabbed
+		IDXGIFactory2* dxgiFactory = nullptr;
 		if (bAllowTearing)
 		{
-			GLog->Logf(TEXT("DX11: Setting up swap chain with tearing support"));
+			IDXGIFactory5* dxgiFactory5 = nullptr;
+			hr = dxgiAdapter->GetParent(IID_PPV_ARGS(&dxgiFactory5));
+
+			if (FAILED(hr))
+			{
+				// Metallicafan212:	Get the DXGI factory2 only
+				bAllowTearing = 0;
+			}
+			else
+			{
+				// Metallicafan212:	See if it supports the effect
+				BOOL bSupportsTearing = 0;
+
+				hr = dxgiFactory5->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING, &bSupportsTearing, sizeof(BOOL));
+
+				if (FAILED(hr) || !bSupportsTearing)
+				{
+					if (FAILED(hr))
+					{
+						GLog->Logf(TEXT("DX11: Device does not support tearing"));
+					}
+					bAllowTearing = 0;
+				}
+
+				SAFE_RELEASE(dxgiFactory5);
+			}
+
+			if (bAllowTearing)
+			{
+				GLog->Logf(TEXT("DX11: Setting up swap chain with tearing support"));
+			}
 		}
 
 		// And obtain the factory object that created it.
@@ -1221,8 +1487,6 @@ void UICBINDx11RenderDevice::SetupResources()
 		//LONG_PTR sChange	= s ^ GetWindowLongPtr((HWND)Viewport->GetWindow(), GWL_STYLE);
 
 		//GLog->Logf(TEXT("Window style changes are %llu and %llu"), esChange, sChange);
-
-		SAFE_RELEASE(dxgiFactory5);
 	}
 	else
 	{
@@ -1258,6 +1522,9 @@ void UICBINDx11RenderDevice::SetupResources()
 			appErrorf(TEXT("Failed to resize buffers with %lu"), hr);
 		}
 	}
+
+	// Metallicafan212:	Initalize shaders, if needed
+	InitShaders();
 
 	// Metallicafan212:	Make sure the correct color space is always set
 	if (ActiveHDR)
@@ -1395,6 +1662,13 @@ void UICBINDx11RenderDevice::SetupResources()
 
 	ThrowIfFailed(hr);
 
+	// Metallicafan212:	Version for selection
+	depthStencilDesc.SampleDesc.Count = 1;
+
+	hr = m_D3DDevice->CreateTexture2D(&depthStencilDesc, nullptr, &m_SelectionDSTex);
+
+	ThrowIfFailed(hr);
+
 	// Metallicafan212:	Now we need to declare the view as the right format
 	CD3D11_DEPTH_STENCIL_VIEW_DESC dtVDesc = CD3D11_DEPTH_STENCIL_VIEW_DESC();
 	dtVDesc.Flags				= 0;
@@ -1405,6 +1679,14 @@ void UICBINDx11RenderDevice::SetupResources()
 	hr = m_D3DDevice->CreateDepthStencilView(m_ScreenDSTex, &dtVDesc, &m_D3DScreenDSV);
 
 	ThrowIfFailed(hr);
+
+	// Metallicafan212:	Selection version of the view
+	dtVDesc.ViewDimension		= D3D11_DSV_DIMENSION_TEXTURE2D;
+
+	hr = m_D3DDevice->CreateDepthStencilView(m_SelectionDSTex, &dtVDesc, &m_SelectionDSV);
+
+	ThrowIfFailed(hr);
+
 
 	// Metallicafan212:	Now make the depth shader resource
 	srvDesc.Format				= DSTSRVFormat;
@@ -1427,67 +1709,6 @@ void UICBINDx11RenderDevice::SetupResources()
 
 	// Metallicafan212:	Set the main surface
 	m_CurrentD2DRT = m_D2DRT;
-
-	// Metallicafan212:	Setup AA now
-	//m_D2DRT->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);//ResolutionScale > 1.0f ? D2D1_ANTIALIAS_MODE_ALIASED : D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-	//m_D2DRT->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
-
-	/*
-	// Metallicafan212:	Get the defaults
-	IDWriteRenderingParams* Def = nullptr;
-	m_D2DRT->GetTextRenderingParams(&Def);
-
-	DWRITE_RENDERING_MODE m = DWRITE_RENDERING_MODE_DEFAULT;//DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC;
-
-	if (Def != nullptr)
-	{
-		// Metallicafan212:	Create the text rendering parameters from the defaults
-		hr = m_D2DWriteFact->CreateCustomRenderingParams(Def->GetGamma(), Def->GetEnhancedContrast(), Def->GetClearTypeLevel(), Def->GetPixelGeometry(), m, &m_TextParams);
-
-		ThrowIfFailed(hr);
-
-		Def->Release();
-	}
-	else
-	{
-		// Metallicafan212:	Make our own....
-		hr = m_D2DWriteFact->CreateCustomRenderingParams(1.0f, 0.0f, 0.0f, DWRITE_PIXEL_GEOMETRY_BGR, m, &m_TextParams);
-
-		ThrowIfFailed(hr);
-	}
-
-	m_D2DRT->SetTextRenderingParams(m_TextParams);
-	*/
-
-	/*
-	// Metallicafan212:	IMPORTANT!!! If we have AA, turn off AA in D2D!
-	if (NumAASamples > 1)
-	{
-		m_D2DRT->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-		m_D2DRT->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
-		
-		// Metallicafan212:	Get the defaults
-		IDWriteRenderingParams* Def = nullptr;
-		m_D2DRT->GetTextRenderingParams(&Def);
-
-		if (Def != nullptr)
-		{
-			// Metallicafan212:	Create the text rendering parameters from the defaults
-			hr = m_D2DWriteFact->CreateCustomRenderingParams(Def->GetGamma(), Def->GetEnhancedContrast(), Def->GetClearTypeLevel(), Def->GetPixelGeometry(), DWRITE_RENDERING_MODE_GDI_NATURAL, &m_TextParams);
-
-			ThrowIfFailed(hr);
-		}
-		else
-		{
-			// Metallicafan212:	Make our own....
-			hr = m_D2DWriteFact->CreateCustomRenderingParams(1.0f, 0.0f, 0.0f, DWRITE_PIXEL_GEOMETRY_RGB, DWRITE_RENDERING_MODE_GDI_NATURAL, &m_TextParams);
-
-			ThrowIfFailed(hr);
-		}
-
-		m_D2DRT->SetTextRenderingParams(m_TextParams);
-	}
-	*/
 #endif
 
 	// Metallicafan212:	Make a totally blank texture
@@ -1539,20 +1760,6 @@ void UICBINDx11RenderDevice::SetupResources()
 
 	ThrowIfFailed(hr);
 
-	// Metallicafan212:	Make a texture to hold onto the palette info
-	Desc.Width				= 256;
-	Desc.Height				= 1;
-	Desc.Format				= DXGI_FORMAT_R8G8B8A8_UNORM;
-
-	hr = m_D3DDevice->CreateTexture2D(&Desc, nullptr, &PaletteTexture);
-
-	ThrowIfFailed(hr);
-
-	// Metallicafan212:	Now the shader resource for it
-	hr = m_D3DDevice->CreateShaderResourceView(PaletteTexture, nullptr, &PaletteSRV);
-
-	ThrowIfFailed(hr);
-
 	m_CurrentBuff = BT_None;
 
 	// Metallicafan212:	Reset our bound textures
@@ -1566,12 +1773,12 @@ void UICBINDx11RenderDevice::SetupResources()
 	D3D11_DEPTH_STENCIL_DESC dsDesc;
 
 	// Depth test parameters
-	dsDesc.DepthEnable					= true;
+	dsDesc.DepthEnable					= TRUE;
 	dsDesc.DepthWriteMask				= D3D11_DEPTH_WRITE_MASK_ALL;
 	dsDesc.DepthFunc					= D3D11_COMPARISON_LESS_EQUAL;
 
 	// Stencil test parameters
-	dsDesc.StencilEnable				= true;
+	dsDesc.StencilEnable				= TRUE;
 	dsDesc.StencilReadMask				= 0xFF;
 	dsDesc.StencilWriteMask				= 0xFF;
 
@@ -1599,6 +1806,13 @@ void UICBINDx11RenderDevice::SetupResources()
 	dsDesc.DepthWriteMask					= D3D11_DEPTH_WRITE_MASK_ZERO;
 	dsDesc.DepthFunc						= D3D11_COMPARISON_LESS_EQUAL;
 	hr = m_D3DDevice->CreateDepthStencilState(&dsDesc, &m_DefaultNoZState);
+	ThrowIfFailed(hr);
+
+	// Metallicafan212:	Create a z state for when we need NO depth or stencil writing
+	dsDesc.DepthEnable						= FALSE;
+	dsDesc.StencilEnable					= FALSE;
+
+	hr = m_D3DDevice->CreateDepthStencilState(&dsDesc, &m_DefaultNoZWriteState);
 	ThrowIfFailed(hr);
 
 	// Metallicafan212:	Set the index and vertex buffers now (since we don't swap them in and out)
@@ -1696,6 +1910,12 @@ void UICBINDx11RenderDevice::Exit()
 	SAFE_RELEASE(IndexBuffer);
 	SAFE_RELEASE(SecondaryVertexBuffer);
 
+	// Metallicafan212:	2024, also free the buffers holy shit
+	SAFE_RELEASE(FrameConstantsBuffer);
+	SAFE_RELEASE(GlobalDistFogBuffer);
+	SAFE_RELEASE(GlobalPolyflagsBuffer);
+	SAFE_RELEASE(BoundTexturesBuffer);
+
 	m_D3DDeviceContext->ClearState();
 
 	// Metallicafan212:	Clear the RT textures
@@ -1709,7 +1929,8 @@ void UICBINDx11RenderDevice::Exit()
 	SAFE_DELETE(FMeshShader);
 	SAFE_DELETE(FSurfShader);
 	SAFE_DELETE(FLineShader);
-	SAFE_DELETE(FMSAAShader);
+	//SAFE_DELETE(FMSAAShader);
+	SAFE_DELETE(ShaderManager);
 #if P8_COMPUTE_SHADER
 	SAFE_DELETE(FP8ToRGBAShader);
 #endif
@@ -1776,10 +1997,9 @@ void UICBINDx11RenderDevice::Exit()
 	SAFE_RELEASE(BlankResourceView);
 	SAFE_RELEASE(BlankSampler);
 
-
 	SAFE_RELEASE(m_DefaultZState);
 	SAFE_RELEASE(m_DefaultNoZState);
-
+	SAFE_RELEASE(m_DefaultNoZWriteState);
 
 	FlushRasterStates();
 
@@ -1788,6 +2008,13 @@ void UICBINDx11RenderDevice::Exit()
 	SAFE_RELEASE(m_D3DSwapChain);
 
 	SAFE_RELEASE(m_D3DQuery);
+
+	// Metallicafan212:	2024, missed resources
+	SAFE_RELEASE(m_MSAAResolveSRV);
+	SAFE_RELEASE(m_MSAAResolveTex);
+
+	SAFE_RELEASE(m_SelectionDSV);
+	SAFE_RELEASE(m_SelectionDSTex);
 
 #if DX11_HP2
 	// Metallicafan212:	HP2 specific
@@ -1802,8 +2029,13 @@ void UICBINDx11RenderDevice::Exit()
 	m_D3DDeviceContext->Flush();
 
 	SAFE_RELEASE(m_D3DDeviceContext);
+
+	// Metallicafan212:	Always reset the render context, so we don't have a dangling nullptr
+	m_RenderContext = nullptr;
+
 	SAFE_RELEASE(m_D3DDeferredContext);
 	SAFE_RELEASE(m_D3DCommandList);
+	SAFE_RELEASE(m_D3DDevice1);
 	SAFE_RELEASE(m_D3DDevice);
 
 	unguard;
@@ -1875,6 +2107,29 @@ void UICBINDx11RenderDevice::Lock(FPlane InFlashScale, FPlane InFlashFog, FPlane
 	Gamma = Viewport->GetOuterUClient()->Brightness * 2.0f;
 #endif
 
+#if DO_BUFFERED_DRAWS
+	// Metallicafan212:	Add a new draw and set it up
+	//CurrentDraw = &BufferedDraws(BufferedDraws.AddZeroed());
+	CurrentDraw = AddDrawCall();
+#endif
+
+	// Metallicafan212:	Hold onto the hit related info
+	m_HitData		= HitData;
+	m_HitSize		= HitSize;
+	m_HitCount		= 0;
+
+	if (m_HitData != nullptr)
+	{
+		// Metallicafan212:	Reset the pixel hit state
+		//PixelHitInfo.AddItem(FPixHitInfo());
+		PixelTopIndex = -1;
+
+		m_HitBufSize	= *m_HitSize;
+
+		// Metallicafan212:	Tell unreal there was no hits (so far)
+		*m_HitSize		= 0;
+	}
+
 	// Metallicafan212:	Require setting buffering on the first draw
 	m_CurrentBuff = BT_None;
 
@@ -1910,13 +2165,19 @@ void UICBINDx11RenderDevice::Lock(FPlane InFlashScale, FPlane InFlashFog, FPlane
 	// Metallicafan212:	Gamma is disabled in HP2 because a speedrunning trick involves messing with the brighness bar
 	//					So, to account for that, there's a manual gamma value (for the time being...)
 	//					11/28/23, added a manual gamma offset (for the time being, until I add in multiple gamma modes)
-	FrameShaderVars.Gamma			= (!Viewport->IsOrtho() ? Gamma + GammaOffset : 1.0f);
+	FrameShaderVars.Gamma				= (!Viewport->IsOrtho() ? Gamma + GammaOffset : 1.0f);
 
-	FrameShaderVars.GammaMode		= GammaMode;
+	FrameShaderVars.GammaMode			= GammaMode;
 
-	FrameShaderVars.HDRExpansion	= AdditionalHDRExpansion;
+	FrameShaderVars.HDRExpansion		= AdditionalHDRExpansion;
 
-	FrameShaderVars.ResolutionScale	= ResolutionScale;
+	FrameShaderVars.ResolutionScale		= ResolutionScale;
+
+	// Metallicafan212:	DX9 specific gamma vars
+	//					This is based on the UD3D9RenderDevice::BuildGammaRamp code, although it might not be very accurate (yet)
+	FrameShaderVars.GammaOffsetRed		= (1.0f / (1.25f * (FrameShaderVars.Gamma + GammaOffsetRed)));
+	FrameShaderVars.GammaOffsetGreen	= (1.0f / (1.25f * (FrameShaderVars.Gamma + GammaOffsetGreen)));
+	FrameShaderVars.GammaOffsetBlue		= (1.0f / (1.25f * (FrameShaderVars.Gamma + GammaOffsetBlue)));
 
 #if DX11_HP2
 	// Metallicafan212:	Check for wireframe
@@ -1929,9 +2190,17 @@ void UICBINDx11RenderDevice::Lock(FPlane InFlashScale, FPlane InFlashFog, FPlane
 		ExtraRasterFlags = 0;
 	}
 #endif
+	
+	// Metallicafan212:	Setup the default raster state
+	SetRasterState(DXRS_Normal);
+
+#if DX11_HP2
+	FrameShaderVars.bDepthDraw				= Viewport->Actor != nullptr ? Viewport->Actor->RendMap == REN_Depth : 0;
+	FrameShaderVars.DepthZRange				= DepthDrawZLimit;
+#endif
 
 	// Metallicafan212:	Set this ONCE!
-	FrameShaderVars.bDoSelection = HitData != nullptr;
+	FrameShaderVars.bDoSelection			= HitData != nullptr;
 
 	FrameShaderVars.bEnableCorrectFogging	= bEnableCorrectFogging;
 	FrameShaderVars.bOneXLightmaps			= bOneXLightmaps;
@@ -1959,7 +2228,10 @@ void UICBINDx11RenderDevice::Lock(FPlane InFlashScale, FPlane InFlashFog, FPlane
 			if (HitData != nullptr)
 			{
 				constexpr FLOAT FirstIndex[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
-				m_RenderContext->ClearRenderTargetView(m_D3DScreenRTV, FirstIndex);
+				//m_RenderContext->ClearRenderTargetView(m_D3DScreenRTV, FirstIndex);
+				m_RenderContext->ClearRenderTargetView(m_BackBuffRT, FirstIndex);
+
+				m_RenderContext->ClearDepthStencilView(m_SelectionDSV, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
 			}
 			else
 			{
@@ -1973,57 +2245,148 @@ void UICBINDx11RenderDevice::Lock(FPlane InFlashScale, FPlane InFlashFog, FPlane
 
 	// Metallicafan212:	Make sure Z buffering is ALWAYS on
 	m_RenderContext->OMSetDepthStencilState(m_DefaultZState, 0);
-	
-
-	// Metallicafan212:	Clear to max Z
-	//m_D3DDeviceContext->ClearRenderTargetView(m_D3DScreenOpacityRTV, DirectX::Colors::White);
-
-	// Metallicafan212:	Make sure we're always using the right RT
-	//RestoreRenderTarget();
-	//m_D3DDeviceContext->OMSetRenderTargets(1, &m_D3DScreenRTV, m_D3DScreenDSV);
-	//BoundRT = nullptr;
 
 	// Metallicafan212:	Hold onto the flash fog for future render
 	FlashScale		= InFlashScale;
 	FlashFog		= InFlashFog;
 
-	// Metallicafan212:	Hold onto the hit related info
-	m_HitData		= HitData;
-	m_HitSize		= HitSize;
-	m_HitCount		= 0;
-
-	if (m_HitData != nullptr)
-	{
-		// Metallicafan212:	Reset the pixel hit state
-		//PixelHitInfo.AddItem(FPixHitInfo());
-		PixelTopIndex = -1;
-
-		m_HitBufSize	= *m_HitSize;
-
-		// Metallicafan212:	Tell unreal there was no hits (so far)
-		*m_HitSize		= 0;
-	}
-
-	// Metallicafan212:	Setup the buffers
-	//					TODO! For performance reasons, I have disabled this block
-	/*
-	LockVertexBuffer(0, 0);
-	LockIndexBuffer(0, 0);
-	UnlockVertexBuffer();
-	UnlockIndexBuffer();
-	*/
-
-	// Metallicafan212:	Reset the buffered state
-	//EndBuffering();
-
-	if (GlobalShaderVars.bDoDistanceFog || GlobalShaderVars.bFadeFogValues)
+#if DX11_HP2
+	if (FogShaderVars.bDoDistanceFog || FogShaderVars.bFadeFogValues)
 		TickDistanceFog();
+#endif
 
 	// Metallicafan212:	Update the shader variables
 	UpdateGlobalShaderVars();
 
-	// Metallicafan212:	If we're using deferred rendering, we have to constantly set our buffers....
-	SetupDeferredRender();
+	unguard;
+}
+
+void UICBINDx11RenderDevice::ExecuteBufferedDraws()
+{
+	guard(UICBINDx11RenderDevice::ExecuteBufferedDraws);
+
+	UnlockBuffers();
+
+	//FBoundTextures Tex;
+
+	// Metallicafan212:	Start from a clean slate?
+	//appMemzero(&Tex, sizeof(FBoundTextures));
+
+	for (INT i = 0; i < BufferedDraws.Num(); i++)
+	{
+		// Metallicafan212:	Get the draw
+		FDrawCall* Call = BufferedDraws(i);
+
+		// Metallicafan212:	Now set everything needed
+		if (Call->bSetBlend)
+		{
+			m_RenderContext->OMSetBlendState(Call->BlendState, nullptr, 0xFFFFFFFF);
+		}
+
+		if (Call->bSetRaster)
+		{
+			m_RenderContext->RSSetState(Call->RasterState);
+		}
+
+		if (Call->bSetDState)
+		{
+			m_RenderContext->OMSetDepthStencilState(Call->DSState, 0);
+		}
+
+		// Metallicafan212:	Set the RT and depth
+		if (Call->bSetRT)
+		{
+			m_RenderContext->OMSetRenderTargets(Call->RTV != nullptr ? 1 : 0, &Call->RTV, Call->DSV);
+		}
+
+		// Metallicafan212:	Now iterate and set each texture
+		if (Call->TBinds.size())
+		{
+			for (auto It = Call->TBinds.begin(); It != Call->TBinds.end(); It++)
+			{
+				m_RenderContext->PSSetShaderResources(It->first, 1, &It->second);
+
+				// Metallicafan212:	Also set the associated sampler
+				m_RenderContext->PSSetSamplers(It->first, 1, &Call->SBinds[It->first]);
+			}
+		}
+
+		// Metallicafan212:	Set the shader
+		if (Call->bSetShader)
+		{
+			//Call->Shader->Bind(m_RenderContext);
+			Call->Shader->SetShaders(m_RenderContext);
+		}
+
+		// Metallicafan212:	Copy and set constants
+		//					TODO! Bind user constants
+		if (Call->bSetFrameConstants)
+		{
+			D3D11_MAPPED_SUBRESOURCE Map;
+
+			m_RenderContext->Map(FrameConstantsBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &Map);
+
+			appMemcpy(Map.pData, &Call->FrameShaderConstants(0), sizeof(FFrameShaderVars));
+
+			m_RenderContext->Unmap(FrameConstantsBuffer, 0);
+		}
+
+		if (Call->bSetFlagConstants)
+		{
+			D3D11_MAPPED_SUBRESOURCE Map;
+
+			m_RenderContext->Map(GlobalPolyflagsBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &Map);
+
+			appMemcpy(Map.pData, &Call->FlagShaderConstants(0), sizeof(FPolyflagVars));
+
+			m_RenderContext->Unmap(GlobalPolyflagsBuffer, 0);
+		}
+
+		if (Call->bSetUserConstants)
+		{
+			// Metallicafan212:	Map and set
+			D3D11_MAPPED_SUBRESOURCE Map;
+
+			m_RenderContext->Map(Call->UserBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &Map);
+
+			appMemcpy(Map.pData, &Call->UserConstants(0), Call->UserConstants.Num());
+
+			m_RenderContext->Unmap(Call->UserBuffer, 0);
+
+			m_RenderContext->VSSetConstantBuffers(FIRST_USER_CONSTBUFF, 1, &Call->UserBuffer);
+			m_RenderContext->GSSetConstantBuffers(FIRST_USER_CONSTBUFF, 1, &Call->UserBuffer);
+			m_RenderContext->PSSetConstantBuffers(FIRST_USER_CONSTBUFF, 1, &Call->UserBuffer);
+		}
+
+		// Metallicafan212:	Setup the topology
+		if (Call->bSetTopology)
+		{
+			m_RenderContext->IASetPrimitiveTopology(Call->Topology);
+		}
+
+		if (Call->bSetTexConstants)
+		{
+			D3D11_MAPPED_SUBRESOURCE Map;
+
+			m_RenderContext->Map(BoundTexturesBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &Map);
+
+			appMemcpy(Map.pData, &Call->TexShaderConstants(0), sizeof(FPolyflagVars));
+
+			m_RenderContext->Unmap(BoundTexturesBuffer, 0);
+		}
+
+		// Metallicafan212:	Now render?
+		if (Call->ISize)
+		{
+			m_RenderContext->DrawIndexed(Call->ISize, Call->IStart, Call->VStart);
+		}
+
+		// Metallicafan212:	Now delete
+		delete Call;
+	}
+
+	BufferedDraws.Empty();
+	CurrentDraw = nullptr;
 
 	unguard;
 }
@@ -2039,9 +2402,6 @@ void UICBINDx11RenderDevice::Unlock(UBOOL Blit)
 	while(RTStack.Num())
 		RestoreRenderTarget();
 
-	// Metallicafan212:	Render now!
-	//DoDeferredRender();
-
 	// Metallicafan212:	Fix the render state
 #if DX11_HP2
 	if (ExtraRasterFlags != 0)
@@ -2049,6 +2409,12 @@ void UICBINDx11RenderDevice::Unlock(UBOOL Blit)
 		ExtraRasterFlags = 0;
 		SetRasterState(DXRS_Normal);
 	}
+#endif
+
+	// Metallicafan212:	Finish execution
+	//					TODO!
+#if DO_BUFFERED_DRAWS
+	ExecuteBufferedDraws();
 #endif
 
 	// Metallicafan212:	Get the selection
@@ -2063,9 +2429,10 @@ void UICBINDx11RenderDevice::Unlock(UBOOL Blit)
 		//ClearPixelHits();
 		*m_HitSize = m_HitCount;
 
-		// Metallicafan212:	TODO! Add this as a debug option
+		// Metallicafan212:	Selection is drawn directly to the back buffer now (to save on resources)
+		//					So running the shader on top isn't needed
 		if(bDebugSelection)
-			Blit = 1;
+			goto JUST_PRESENT;
 	}
 
 	if (Blit)
@@ -2073,172 +2440,9 @@ void UICBINDx11RenderDevice::Unlock(UBOOL Blit)
 		// Metallicafan212:	Copy to the screen
 		if (NumAASamples > 1)
 		{
-#if DX11_USE_MSAA_SHADER
-
-#if USE_MSAA_COMPUTE
-			/*
-			if (bUseMSAAComputeShader)
-			{
-				// Metallicafan212:	Use a compute shader instead!!!
-				SetTexture(0, nullptr, 0);
-				//SetTexture(1, nullptr, 0);
-
-				m_D3DDeviceContext->OMSetRenderTargets(0, nullptr, nullptr);
-
-				m_D3DDeviceContext->CSSetShaderResources(0, 1, &m_ScreenRTSRV);
-				//m_RenderContext->CSSetShaderResources(1, 1, &m_ScreenDTSRV);
-
-				// Metallicafan212:	Now bind the output
-				m_D3DDeviceContext->CSSetUnorderedAccessViews(0, 1, &m_BackBuffUAV, nullptr);
-
-				// Metallicafan212:	Bind the shader
-				FMSAAShader->Bind(m_D3DDeviceContext);
-
-				// Metallicafan212:	Now execute!
-				m_D3DDeviceContext->Dispatch(MSAAThreadX, MSAAThreadY, 1);
-
-				// Metallicafan212:	Wait for it to complete...
-				m_D3DDeviceContext->End(m_D3DQuery);
-
-				// Metallicafan212:	Wait for it
-				BOOL bDone = 0;
-
-				while (m_D3DDeviceContext->GetData(m_D3DQuery, &bDone, sizeof(BOOL), 0) != S_OK && bDone == 0);
-
-				// Metallicafan212:	Clear the render resources!!!
-				constexpr ID3D11ShaderResourceView* SRVTemp[2] = { nullptr, nullptr };
-				m_D3DDeviceContext->CSSetShaderResources(0, 2, SRVTemp);
-
-
-				constexpr ID3D11UnorderedAccessView* Temp[1] = { nullptr };
-				m_D3DDeviceContext->CSSetUnorderedAccessViews(0, 1, Temp, nullptr);
-
-				RestoreRenderTarget();
-				*/
-#else
-
-				// Metallicafan212:	We have to do geometry now...
-				EndBuffering();
-
-				// Metallicafan212:	Order of operations, make sure the alpha rejection is set
-				SetBlend(0);
-
-				SetTexture(0, nullptr, 0);
-				SetTexture(1, nullptr, 0);
-
-				// Metallicafan212:	Manually setup the vars...
-				m_RenderContext->OMSetRenderTargets(1, &m_BackBuffRT, nullptr);
-				m_RenderContext->PSSetShaderResources(0, 1, &m_ScreenRTSRV);
-				m_RenderContext->PSSetShaderResources(1, 1, &m_ScreenDTSRV);
-
-				FMSAAShader->Bind();
-
-				FLOAT Z		= 1.0f;
-				FLOAT X		= 0.0f;
-				FLOAT Y		= 0.0f;
-				FLOAT XL	= ScaledSceneNodeX;//m_sceneNodeX;
-				FLOAT YL	= ScaledSceneNodeY;//m_sceneNodeY;
-
-				// Metallicafan212:	Now make 2 triangles
-				//					I copied this all from the tile rendering, since I'm such a lazy fucking bastard
-				FLOAT PX1	= X - (XL * 0.5f);
-				FLOAT PX2	= PX1 + XL;
-				FLOAT PY1	= Y - (YL * 0.5f);
-				FLOAT PY2	= PY1 + YL;
-
-				FLOAT RPX1	= m_RFX2 * PX1;
-				FLOAT RPX2	= m_RFX2 * PX2;
-				FLOAT RPY1	= m_RFY2 * PY1;
-				FLOAT RPY2	= m_RFY2 * PY2;
-
-				FLOAT SU1 = 0.0f;
-				FLOAT SU2 = 1.0f;
-				FLOAT SV1 = 0.0f;
-				FLOAT SV2 = 1.0f;
-
-				RPX1 *= Z;
-				RPX2 *= Z;
-				RPY1 *= Z;
-				RPY2 *= Z;
-
-
-				// Metallicafan212:	Disable depth lmao
-				//ID3D11DepthStencilState* CurState	= nullptr;
-				//UINT Sten							= 0;
-				//m_RenderContext->OMGetDepthStencilState(&CurState, &Sten);
-				//m_RenderContext->OMSetDepthStencilState(m_DefaultNoZState, 0);
-
-				LockVertexBuffer(6 * sizeof(FD3DVert));
-
-				//m_RenderContext->IASetInputLayout(nullptr);
-
-				// Metallicafan212:	Start buffering now
-				StartBuffering(BT_ScreenFlash);
-
-				m_VertexBuff[0].X		= RPX1;
-				m_VertexBuff[0].Y		= RPY1;
-				m_VertexBuff[0].Z		= Z;
-				m_VertexBuff[0].U		= SU1;
-				m_VertexBuff[0].V		= SV1;
-
-				m_VertexBuff[1].X		= RPX2;
-				m_VertexBuff[1].Y		= RPY1;
-				m_VertexBuff[1].Z		= Z;
-				m_VertexBuff[1].U		= SU2;
-				m_VertexBuff[1].V		= SV1;
-
-				m_VertexBuff[2].X		= RPX2;
-				m_VertexBuff[2].Y		= RPY2;
-				m_VertexBuff[2].Z		= Z;
-				m_VertexBuff[2].U		= SU2;
-				m_VertexBuff[2].V		= SV2;
-
-				m_VertexBuff[3].X		= RPX1;
-				m_VertexBuff[3].Y		= RPY1;
-				m_VertexBuff[3].Z		= Z;
-				m_VertexBuff[3].U		= SU1;
-				m_VertexBuff[3].V		= SV1;
-
-				m_VertexBuff[4].X		= RPX2;
-				m_VertexBuff[4].Y		= RPY2;
-				m_VertexBuff[4].Z		= Z;
-				m_VertexBuff[4].U		= SU2;
-				m_VertexBuff[4].V		= SV2;
-
-				m_VertexBuff[5].X		= RPX1;
-				m_VertexBuff[5].Y		= RPY2;
-				m_VertexBuff[5].Z		= Z;
-				m_VertexBuff[5].U		= SU1;
-				m_VertexBuff[5].V		= SV2;
-
-				UnlockVertexBuffer();
-
-				//m_RenderContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-				AdvanceVertPos();//6);
-
-				// Metallicafan212:	Draw
-				EndBuffering();
-
-				// Metallicafan212:	Reset Z state
-				//m_RenderContext->OMSetDepthStencilState(CurState, Sten);
-
-				SetTexture(0, nullptr, 0);
-				SetTexture(1, nullptr, 0);
-
-				RestoreRenderTarget();
-#endif
-			/*
-			}
-			else
-			*/
-#endif
-			{
-				//m_D3DDeviceContext->ResolveSubresource(m_BackBuffTex, 0, m_ScreenBuffTex, 0, ScreenFormat);
-				m_D3DDeviceContext->ResolveSubresource(m_MSAAResolveTex, 0, m_ScreenBuffTex, 0, ScreenFormat);
-			}
+			m_D3DDeviceContext->ResolveSubresource(m_MSAAResolveTex, 0, m_ScreenBuffTex, 0, ScreenFormat);
 		}
 		// Metallicafan212:	Always use the resolution scaling shader, so we can do final effects on the screen
-		//else
 		{
 #if USE_RES_COMPUTE
 			// Metallicafan212:	Use a compute shader instead!!!
@@ -2324,7 +2528,7 @@ void UICBINDx11RenderDevice::Unlock(UBOOL Blit)
 				SDesc.MaxAnisotropy		= 1;//16;//16;
 				SDesc.ComparisonFunc	= D3D11_COMPARISON_NEVER;
 
-				HRESULT hr = m_D3DDevice->CreateSamplerState(&SDesc, &ScreenSamp);
+				HRESULT hr				= m_D3DDevice->CreateSamplerState(&SDesc, &ScreenSamp);
 
 				ThrowIfFailed(hr);
 			}
@@ -2332,108 +2536,41 @@ void UICBINDx11RenderDevice::Unlock(UBOOL Blit)
 			// Metallicafan212:	Start buffering now
 			StartBuffering(BT_ScreenFlash);
 
-			// Metallicafan212:	Render as a quad 🙃🙃🙃🙃🙃🙃🙃
-			//EndBuffering();
-
 			// Metallicafan212:	Order of operations, make sure the alpha rejection is set
 			SetBlend(PF_Occlude);
 
 			SetTexture(0, nullptr, 0);
 
-			m_RenderContext->PSSetSamplers(0, 1, &ScreenSamp);
 
+#if DO_BUFFERED_DRAWS
+			CheckDrawCall();
+			CurrentDraw->TBinds[0]	= NumAASamples > 1 ? m_MSAAResolveSRV : m_ScreenRTSRV;
+			CurrentDraw->SBinds[0]	= ScreenSamp;
+			CurrentDraw->RTV		= m_BackBuffRT;
+			CurrentDraw->bSetRT		= 1;
+#else
+			m_RenderContext->PSSetSamplers(0, 1, &ScreenSamp);
 			// Metallicafan212:	Manually setup the vars...
 			m_RenderContext->OMSetRenderTargets(1, &m_BackBuffRT, nullptr);
 			m_RenderContext->PSSetShaderResources(0, 1, NumAASamples > 1 ? &m_MSAAResolveSRV : &m_ScreenRTSRV);
+#endif
 
 			SetSceneNode(nullptr);
 
 			FResScaleShader->Bind(m_RenderContext);
 
-			/*
-			FLOAT Z = 1.0f;
-			FLOAT X = 0.0f;
-			FLOAT Y = 0.0f;
-			FLOAT XL = SizeX;
-			FLOAT YL = SizeY;
-
-			// Metallicafan212:	Now make 2 triangles
-			//					I copied this all from the tile rendering, since I'm such a lazy fucking bastard
-			FLOAT PX1 = X - (XL * 0.5f);
-			FLOAT PX2 = PX1 + XL;
-			FLOAT PY1 = Y - (YL * 0.5f);
-			FLOAT PY2 = PY1 + YL;
-
-			FLOAT RPX1 = m_RFX2 * PX1;
-			FLOAT RPX2 = m_RFX2 * PX2;
-			FLOAT RPY1 = m_RFY2 * PY1;
-			FLOAT RPY2 = m_RFY2 * PY2;
-
-			FLOAT SU1 = 0.0f;
-			FLOAT SU2 = 1.0f;
-			FLOAT SV1 = 0.0f;
-			FLOAT SV2 = 1.0f;
-
-			//RPX1 *= Z;
-			//RPX2 *= Z;
-			//RPY1 *= Z;
-			//RPY2 *= Z;
-			*/
-
-			//LockVertexBuffer(6 * sizeof(FD3DVert));
 			LockVertAndIndexBuffer(6);
 
 			appMemcpy(m_VertexBuff, ScreenVerts, sizeof(FD3DVert) * 6);
 
-			/*
-			m_VertexBuff[0].X		= RPX1;
-			m_VertexBuff[0].Y		= RPY1;
-			m_VertexBuff[0].Z		= Z;
-			m_VertexBuff[0].U		= SU1;
-			m_VertexBuff[0].V		= SV1;
-			m_VertexBuff[0].Color	= FPlane(1.f, 1.f, 1.f, 1.f);
-
-			m_VertexBuff[1].X		= RPX2;
-			m_VertexBuff[1].Y		= RPY1;
-			m_VertexBuff[1].Z		= Z;
-			m_VertexBuff[1].U		= SU2;
-			m_VertexBuff[1].V		= SV1;
-			m_VertexBuff[1].Color	= FPlane(1.f, 1.f, 1.f, 1.f);
-
-			m_VertexBuff[2].X		= RPX2;
-			m_VertexBuff[2].Y		= RPY2;
-			m_VertexBuff[2].Z		= Z;
-			m_VertexBuff[2].U		= SU2;
-			m_VertexBuff[2].V		= SV2;
-			m_VertexBuff[2].Color	= FPlane(1.f, 1.f, 1.f, 1.f);
-
-			m_VertexBuff[3].X		= RPX1;
-			m_VertexBuff[3].Y		= RPY1;
-			m_VertexBuff[3].Z		= Z;
-			m_VertexBuff[3].U		= SU1;
-			m_VertexBuff[3].V		= SV1;
-			m_VertexBuff[3].Color	= FPlane(1.f, 1.f, 1.f, 1.f);
-
-			m_VertexBuff[4].X		= RPX2;
-			m_VertexBuff[4].Y		= RPY2;
-			m_VertexBuff[4].Z		= Z;
-			m_VertexBuff[4].U		= SU2;
-			m_VertexBuff[4].V		= SV2;
-			m_VertexBuff[4].Color	= FPlane(1.f, 1.f, 1.f, 1.f);
-
-			m_VertexBuff[5].X		= RPX1;
-			m_VertexBuff[5].Y		= RPY2;
-			m_VertexBuff[5].Z		= Z;
-			m_VertexBuff[5].U		= SU1;
-			m_VertexBuff[5].V		= SV2;
-			m_VertexBuff[5].Color	= FPlane(1.f, 1.f, 1.f, 1.f);
-			*/
-
-			//m_RenderContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 			AdvanceVertPos();
 
 			// Metallicafan212:	Draw
 			EndBuffering();
+
+#if DO_BUFFERED_DRAWS
+			ExecuteBufferedDraws();
+#endif
 
 			//SetTexture(0, nullptr, 0);
 			// Metallicafan212:	Fix the shader holding onto the RT texture
@@ -2443,31 +2580,91 @@ void UICBINDx11RenderDevice::Unlock(UBOOL Blit)
 #endif
 		}
 
+	JUST_PRESENT:
 		static constexpr DXGI_PRESENT_PARAMETERS Parm{ 0, nullptr, nullptr, nullptr };
-		HRESULT hr = m_D3DSwapChain->Present1(UseVSync ? 1 : 0, (bAllowTearing && !bFullscreen && !UseVSync ? DXGI_PRESENT_ALLOW_TEARING : 0), &Parm);//m_D3DSwapChain->Present(0, 0);
+		HRESULT hr = m_D3DSwapChain->Present1(UseVSync ? 1 : 0, (bAllowTearing && !bFullscreen && !UseVSync ? DXGI_PRESENT_ALLOW_TEARING : 0), &Parm);
 
-		// Metallicafan212:	Check if DXGI needs a resize (alt+tab in fullscreen for example)
-		if (hr == DXGI_ERROR_INVALID_CALL)
+		// Metallicafan212:	Check the return code
+		switch (hr)
 		{
-			SetupResources();
-		}
-		else if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET)
-		{
-			SetupDevice();
-			SetupResources();
-		}
-		else if(!SUCCEEDED(hr))//hr != DXGI_STATUS_OCCLUDED)
-		{
-			ThrowIfFailed(hr);
+			// Metallicafan212:	Check if DXGI needs a resize (alt+tab in fullscreen for example)
+			case DXGI_ERROR_INVALID_CALL:
+			{
+				SetupResources();
+				break;
+			}
+
+			// Metallicafan212:	Errors here indicate large failures
+			case DXGI_ERROR_DEVICE_REMOVED:
+			case DXGI_ERROR_DEVICE_RESET:
+			{
+				// Metallicafan212:	Figure out the issue
+				HRESULT reason = m_D3DDevice->GetDeviceRemovedReason();
+
+				switch (reason)
+				{
+					case DXGI_ERROR_DEVICE_HUNG:
+					{
+						appErrorf(TEXT("DX11: Device hung, cannot continue"));
+
+						break;
+					}
+
+					case DXGI_ERROR_DEVICE_REMOVED:
+					{
+						GWarn->Logf(TEXT("DX11: Device removed, recreating the driver resources"));
+
+						SetupDevice();
+						SetupResources();
+
+						break;
+					}
+
+					case DXGI_ERROR_DEVICE_RESET:
+					{
+						GWarn->Logf(TEXT("DX11: Device reset, recreating the driver resources"));
+						SetupDevice();
+						SetupResources();
+
+						break;
+					}
+
+					case DXGI_ERROR_DRIVER_INTERNAL_ERROR:
+					{
+						GWarn->Logf(TEXT("DX11: Driver internal error, recreating the device"));
+
+						SetupDevice();
+						SetupResources();
+
+						break;
+					}
+
+					case DXGI_ERROR_INVALID_CALL:
+					{
+						appErrorf(TEXT("DX11: Device removed reason is invalid call"));
+
+						break;
+					}
+				}
+
+				break;
+			}
+
+			default:
+			{
+				// Metallicafan212:	Other errors? Throw if so
+				ThrowIfFailed(hr);
+			}
 		}
 	}
 
+	// Metallicafan212:	Allow the user to see the selection rendering (rather than quickly swapping back)
 	if (bDebugSelection && m_HitData != nullptr)
 	{
 		appSleep(1.0f);
 	}
 
-	// Metallicafan212:	Grab all the debug info!!!!
+	// Metallicafan212:	Get optional debug info
 	if (m_D3DQueue != nullptr)
 	{
 		UINT64 n = m_D3DQueue->GetNumStoredMessages();
@@ -2491,14 +2688,14 @@ void UICBINDx11RenderDevice::Unlock(UBOOL Blit)
 
 				if (mSize != 0)
 				{
-					temp = (D3D11_MESSAGE*)malloc(mSize);
+					temp = (D3D11_MESSAGE*)appMalloc(mSize, TEXT("DX11 Debug Message"));
 
 					m_D3DQueue->GetMessage(i, temp, &mSize);
 
 					// Metallicafan212:	Now log it
 					GWarn->Logf(TEXT("DX11 debug message (%s): %s at %s"), GetD3DDebugSeverity(temp->Severity), appFromAnsi(temp->pDescription), tStamp);
 
-					free(temp);
+					appFree(temp);
 				}
 			}
 		}
@@ -2516,6 +2713,10 @@ void UICBINDx11RenderDevice::ClearZ(FSceneNode* Frame)
 	// Metallicafan212:	Turn back on Z buffering
 	SetBlend(PF_Occlude);
 
+#if DO_BUFFERED_DRAWS
+	ExecuteBufferedDraws();
+#endif
+
 	// Metallicafan212:	Clear the current DSV instead of the local one
 	if (BoundRT != nullptr)
 	{
@@ -2523,7 +2724,14 @@ void UICBINDx11RenderDevice::ClearZ(FSceneNode* Frame)
 	}
 	else
 	{
-		m_RenderContext->ClearDepthStencilView(m_D3DScreenDSV, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
+		if (m_HitData != nullptr)
+		{
+			m_RenderContext->ClearDepthStencilView(m_SelectionDSV, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
+		}
+		else
+		{
+			m_RenderContext->ClearDepthStencilView(m_D3DScreenDSV, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
+		}
 	}
 
 	unguard;
@@ -2532,16 +2740,6 @@ void UICBINDx11RenderDevice::ClearZ(FSceneNode* Frame)
 void UICBINDx11RenderDevice::EndFlash()
 {
 	guard(UICBINDx11RenderDevice::EndFlash);
-
-#if DX11_HP2
-	/*
-	// Metallicafan212:	Test for a very small, but not 0 float, since the code seems to keep running for some reason
-	if ((1.0f - Min(FlashScale.W * 2.0f, 1.0f)) <= 0.0001f)
-	{
-		return;
-	}
-	*/
-#endif
 
 	// Metallicafan212:	Draw it as a tile, but using the generic shader
 #if DX11_HP2
@@ -2578,8 +2776,8 @@ void UICBINDx11RenderDevice::EndFlash()
 			Z = 0.1f;
 		}
 
-		FLOAT XL	= ScaledSceneNodeX;//m_sceneNodeX;
-		FLOAT YL	= ScaledSceneNodeY;//m_sceneNodeY;
+		FLOAT XL	= ScaledSceneNodeX;
+		FLOAT YL	= ScaledSceneNodeY;
 
 		// Metallicafan212:	Now make 2 triangles
 		//					I copied this all from the tile rendering, since I'm such a lazy fucking bastard
@@ -2602,8 +2800,19 @@ void UICBINDx11RenderDevice::EndFlash()
 		// Metallicafan212:	Disable depth lmao
 		ID3D11DepthStencilState* CurState = nullptr;
 		UINT Sten = 0;
+
+#if DO_BUFFERED_DRAWS
+		ExecuteBufferedDraws();
+#endif
+
 		m_RenderContext->OMGetDepthStencilState(&CurState, &Sten);
+#if DO_BUFFERED_DRAWS
+		CheckDrawCall();
+		CurrentDraw->bSetDState = 1;
+		CurrentDraw->DSState	= m_DefaultNoZState;
+#else
 		m_RenderContext->OMSetDepthStencilState(m_DefaultNoZState, 0);
+#endif
 
 		//LockVertexBuffer(6 * sizeof(FD3DVert));
 		LockVertAndIndexBuffer(6);
@@ -2638,17 +2847,18 @@ void UICBINDx11RenderDevice::EndFlash()
 		m_VertexBuff[5].Y		= RPY2;
 		m_VertexBuff[5].Z		= Z;
 
-		//UnlockVertexBuffer();
-		//UnlockBuffers();
-
-		//m_RenderContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-		AdvanceVertPos();//6);
+		AdvanceVertPos();
 
 		// Metallicafan212:	Draw
 		EndBuffering();
 
 		// Metallicafan212:	Reset Z state
+#if DO_BUFFERED_DRAWS
+		CurrentDraw->bSetDState = 1;
+		CurrentDraw->DSState	= CurState;
+#else
 		m_RenderContext->OMSetDepthStencilState(CurState, Sten);
+#endif
 	}
 
 	unguard;
@@ -2689,12 +2899,12 @@ void UICBINDx11RenderDevice::SetSceneNode(FSceneNode* Frame)
 
 		// Metallicafan212:	All of this is copied from the DX9 driver
 		// Precompute stuff.
-		FLOAT rcpFrameFX = 1.0f / NewX;//Frame->FX;
-		m_Aspect = NewY * rcpFrameFX;//Frame->FY * rcpFrameFX;
+		FLOAT rcpFrameFX = 1.0f / NewX;
+		m_Aspect = NewY * rcpFrameFX;
 
 		// Metallicafan212:	This is HP2 specific! Since I have a viewport FOV that is calcuated to be a hor+ FOV, so 90 @ 16x9 is 109
 #if DX11_HP2
-		m_RProjZ = appTan(Viewport->FOVAngle * PI / 360.0);//Viewport->Actor->FovAngle * PI / 360.0);
+		m_RProjZ = appTan(Viewport->FOVAngle * PI / 360.0);
 #else
 		m_RProjZ = appTan(Viewport->Actor->FovAngle * PI / 360.0);
 #endif
@@ -2729,13 +2939,8 @@ void UICBINDx11RenderDevice::SetSceneNode(FSceneNode* Frame)
 			NewYB	*= ResolutionScale;
 
 			// Metallicafan212:	Scaled FX2 and FY2
-#if 1//!RES_SCALE_IN_PROJ
 			ScaledFX2 = Frame->FX2 * ResolutionScale;
 			ScaledFY2 = Frame->FY2 * ResolutionScale;
-#else
-			ScaledFX2 = Frame->FX2;
-			ScaledFY2 = Frame->FY2;
-#endif
 		}
 		else
 		{
@@ -2758,12 +2963,12 @@ void UICBINDx11RenderDevice::SetSceneNode(FSceneNode* Frame)
 
 		// Metallicafan212:	All of this is copied from the DX9 driver
 		// Precompute stuff.
-		FLOAT rcpFrameFX = 1.0f / NewX;//Frame->FX;
-		m_Aspect = NewY * rcpFrameFX;//Frame->FY * rcpFrameFX;
+		FLOAT rcpFrameFX = 1.0f / NewX;
+		m_Aspect = NewY * rcpFrameFX;
 
 		// Metallicafan212:	This is HP2 specific! Since I have a viewport FOV that is calcuated to be a hor+ FOV, so 90 @ 16x9 is 109
 #if DX11_HP2
-		m_RProjZ = appTan(Viewport->FOVAngle * PI / 360.0);//Viewport->Actor->FovAngle * PI / 360.0);
+		m_RProjZ = appTan(Viewport->FOVAngle * PI / 360.0);
 #else
 		m_RProjZ = appTan(Viewport->Actor->FovAngle * PI / 360.0);
 #endif
@@ -2787,6 +2992,7 @@ void UICBINDx11RenderDevice::SetSceneNode(FSceneNode* Frame)
 	unguard;
 }
 
+// Metallicafan212:	TODO! Rewrite this to check if it needs an update (changed variables, etc.)
 // Metallicafan212:	Shamfully copied from the DX9 renderer
 void UICBINDx11RenderDevice::SetProjectionStateNoCheck(UBOOL bRequestingNearRangeHack, UBOOL bForceUpdate)
 {
@@ -2823,7 +3029,7 @@ void UICBINDx11RenderDevice::SetProjectionStateNoCheck(UBOOL bRequestingNearRang
 	//Set zFar
 #if DX11_HP2 || DX11_UNREAL_227 || DX11_UT_469
 	// Metallicafan212:	Increased to the next power of two
-	zFar = 65535.0f;//49152.0f;
+	zFar = 65535.0f;
 #else
 	zFar = 32768.0f;
 #endif
@@ -2901,24 +3107,12 @@ void UICBINDx11RenderDevice::SetProjectionStateNoCheck(UBOOL bRequestingNearRang
 
 	// Metallicafan212:	I've fixed this to the correct order it should be
 	FrameShaderVars.Proj.m[0][0] = 2.0f * zNear * invRightMinusLeft;
-	//FrameShaderVars.Proj.m[0][1] = 0.0f;
-	FrameShaderVars.Proj.m[0][2] = -1.0f / ScaledSceneNodeX;//0.0f;
-	//FrameShaderVars.Proj.m[0][3] = 0.0f;
-
-	//FrameShaderVars.Proj.m[1][0] = 0.0f;
+	FrameShaderVars.Proj.m[0][2] = -1.0f / ScaledSceneNodeX;
 	FrameShaderVars.Proj.m[1][1] = -2.0f * zNear * invTopMinusBottom;
 	FrameShaderVars.Proj.m[1][2] = 1.0f / ScaledSceneNodeY;
-	//FrameShaderVars.Proj.m[1][3] = 0.0f;
-
-	//FrameShaderVars.Proj.m[2][0] = 0.0f;
-	//FrameShaderVars.Proj.m[2][1] = 0.0f;
 	FrameShaderVars.Proj.m[2][2] = -zScaleVal * (zFar * invNearMinusFar);
 	FrameShaderVars.Proj.m[2][3] = zScaleVal * zScaleVal * (zNear * zFar * invNearMinusFar);
-
-	//FrameShaderVars.Proj.m[3][0] = 0.0f;
-	//FrameShaderVars.Proj.m[3][1] = 0.0f;
 	FrameShaderVars.Proj.m[3][2] = 1.0f;
-	//FrameShaderVars.Proj.m[3][3] = 0.0f;
 #endif
 
 	// Metallicafan212:	Now update the bind

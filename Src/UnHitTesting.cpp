@@ -77,7 +77,7 @@ void UICBINDx11RenderDevice::PopHit(INT Count, UBOOL bForce)
 			// Metallicafan212:	Unwind the hit info, from the top
 			TArray<FPixHitInfo*> Parents;
 
-			FPixHitInfo* Top = &PixelHitInfo(PixelHitInfo.Num() - 1);
+			FPixHitInfo* Top = Info;//&PixelHitInfo(PixelHitInfo.Num() - 1);
 
 			// Metallicafan212:	Go until we hit the topmost parent
 			while (Top != nullptr)
@@ -106,6 +106,8 @@ void UICBINDx11RenderDevice::PopHit(INT Count, UBOOL bForce)
 
 		// Metallicafan212:	Move the data pointer
 		m_HitData = Data;
+
+		PixelTopIndex = -1;
 	}
 
 	SetupPixelHitTest();
@@ -249,7 +251,7 @@ void UICBINDx11RenderDevice::DetectPixelHit()
 	guard(UICBINDx11RenderDevice::DetectPixelHit);
 
 	// Metallicafan212:	Early break
-	if (PixelHitInfo.Num() == 0 || Viewport->HitXL == 0 || Viewport->HitXL == 0)
+	if (PixelHitInfo.Num() == 0 || Viewport->HitXL == 0 || Viewport->HitYL == 0)
 		return;
 
 	TMap<INT, INT> HitAppear;
@@ -258,10 +260,11 @@ void UICBINDx11RenderDevice::DetectPixelHit()
 	INT BiggestHitCount = 0;
 
 	ID3D11Texture2D* ScreenCopy = nullptr;
-	ID3D11Texture2D* Resolved	= nullptr;
+	//ID3D11Texture2D* Resolved	= nullptr;
 	HRESULT hr = S_OK;
 
 	guard(CopyFromRT);
+	/*
 	// Metallicafan212:	Get a copy of the render target!
 	//					We have to copy the whole damn thing when MSAA is enabled!!!!!!!
 	//					Because of that, we need to resolve to a temp texture....
@@ -282,6 +285,7 @@ void UICBINDx11RenderDevice::DetectPixelHit()
 	hr = m_D3DDevice->CreateTexture2D(&ResolveDesc, nullptr, &Resolved);
 
 	ThrowIfFailed(hr);
+	*/
 
 	D3D11_TEXTURE2D_DESC Desc;
 
@@ -302,8 +306,9 @@ void UICBINDx11RenderDevice::DetectPixelHit()
 	ThrowIfFailed(hr);
 
 	// Metallicafan212:	Now get the screen resource
-	ID3D11Resource* RTResource = nullptr;
+	//ID3D11Resource* RTResource = nullptr;
 
+	/*
 	// Metallicafan212:	Make sure it's bound!!!!
 	ID3D11RenderTargetView* test = nullptr;
 	m_RenderContext->OMGetRenderTargets(1, &test, nullptr);
@@ -315,15 +320,16 @@ void UICBINDx11RenderDevice::DetectPixelHit()
 			test->Release();
 
 		ScreenCopy->Release();
-		Resolved->Release();
+		//Resolved->Release();
 
 		return;
 	}
 
 	// Metallicafan212:	This needs to be reset!!!
 	SAFE_RELEASE(test);
+	*/
 
-	m_D3DScreenRTV->GetResource(&RTResource);
+	//m_D3DScreenRTV->GetResource(&RTResource);
 
 	D3D11_BOX Box;
 
@@ -335,17 +341,17 @@ void UICBINDx11RenderDevice::DetectPixelHit()
 	Box.bottom				= Box.top + (Viewport->HitYL * ResolutionScale);
 	Box.back				= 1;
 	
-	m_RenderContext->ResolveSubresource(Resolved, 0, RTResource, 0, ScreenFormat);
+	//m_RenderContext->ResolveSubresource(Resolved, 0, RTResource, 0, ScreenFormat);
 
 	// Metallicafan212:	Now copy
-	m_RenderContext->CopySubresourceRegion(ScreenCopy, 0, 0, 0, 0, Resolved, 0, &Box);
+	m_RenderContext->CopySubresourceRegion(ScreenCopy, 0, 0, 0, 0, m_BackBuffTex, 0, &Box);//Resolved, 0, &Box);
 
-	SAFE_RELEASE(Resolved);
+	//SAFE_RELEASE(Resolved);
 
 	//m_RenderContext->Flush();
 
 	// Metallicafan212:	Now release that copy
-	RTResource->Release();
+	//RTResource->Release();
 
 	unguard;
 
@@ -370,6 +376,7 @@ void UICBINDx11RenderDevice::DetectPixelHit()
 	FPixelIndex		BGRAIndex;
 	FPixelIndexRGBA	RGBAIndex;
 
+#if 0
 #define TEST_PIXEL(InStruct) \
 	/* Metallicafan212:	Bad pixel*/ \
 	if(InStruct.A != 255 && InStruct.Int4 != 0) \
@@ -394,7 +401,25 @@ void UICBINDx11RenderDevice::DetectPixelHit()
 		/* Metallicafan212:	Priority is done when the hit is pushed*/ \
 		HitAppear.Set(InStruct.Int4, *Val + PixelHitInfo(InStruct.Int4).Priority); \
 	}
-	
+#else
+
+#define TEST_PIXEL(InStruct) \
+	/* Metallicafan212:	Bad pixel*/ \
+	if(InStruct.A != 255 && InStruct.Int4 != 0) \
+		continue; \
+	InStruct.A = 0; \
+	/* Metallicafan212:	I moved it out by 100 to detect bad hits*/ \
+	if(InStruct.Int4 % 100 != 0) \
+		continue; \
+	InStruct.Int4 /= 100; \
+	/* Metallicafan212:	Make sure it's in range, don't want it to be causing crashes*/ \
+	if (InStruct.Int4 < PHitNum) \
+	{ \
+		/* Metallicafan212:	Priority is done when the hit is pushed*/ \
+		HitAppear.Set(InStruct.Int4, PixelHitInfo(InStruct.Int4).Priority); \
+	}
+
+#endif
 
 	for (INT y = 0; y < HitYL; y++)
 	{
@@ -430,9 +455,9 @@ void UICBINDx11RenderDevice::DetectPixelHit()
 	for (TMap<INT, INT>::TIterator HitItt(HitAppear); HitItt; ++HitItt)
 	{
 		// Metallicafan212:	Prioritize clicking something over clicking the backdrop
-		if (BiggestHit == 0 || (BiggestHitCount < HitItt.Value() && HitItt.Key() != 0))
+		if (BiggestHit == 0 || (BiggestHitCount < HitItt.Value() && HitItt.Key() != 0)) //|| (BiggestHitCount == HitItt.Value() && BiggestHit < HitItt.Key()))
 		{
-			BiggestHit = HitItt.Key();
+			BiggestHit		= HitItt.Key();
 			BiggestHitCount = HitItt.Value();
 		}
 	}
@@ -500,12 +525,7 @@ void UICBINDx11RenderDevice::SetupPixelHitTest()
 	guard(UICBINDx11RenderDevice::SetupPixelHitTest);
 
 	// Metallicafan212:	Do pixel selection through the normal shaders
-
-	DWORD Index = PixelHitInfo.Num();
-
-	// Metallicafan212:	Fix for my stupidity
-	if (Index)
-		Index -= 1;
+	DWORD Index = (PixelTopIndex >= 0 ? PixelTopIndex : 0);
 
 	// Metallicafan212:	Convert implicitly to BGRA, as that's what will be written to the screen (D3DFMT_ARGB)
 	FPixelIndex			Temp;

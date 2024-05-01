@@ -13,14 +13,15 @@ struct FTileMatrixDef : FShaderVarCommon
 	UBOOL	bIsMSAAFontTile;
 
 	// Metallicafan212:	Keep it aligned along register bounds
-	FLOAT	Pad3[2];//[3];
+	FLOAT	Pad3[2];
 };
 
 // Metallicafan212:	This file defines the tile rendering shader
 FD3DTileShader::FD3DTileShader(UICBINDx11RenderDevice* InParent)
 	: FD3DShader(InParent),
 	bDoTileRotation(0),
-	TileCoords(GMath.UnitCoords)
+	TileCoords(GMath.UnitCoords),
+	bDoMSAAFontHack(0)
 {
 	guard(FD3DTileShader::FD3DTileShader);
 	

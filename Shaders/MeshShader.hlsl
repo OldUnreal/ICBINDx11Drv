@@ -7,8 +7,8 @@ cbuffer CommonBuffer : register (START_CONST_NUM)
 	COMMON_VARS
 	
 	// Metallicafan212:	TODO! More vars
-	int bNoOpacity		: packoffset(c4.x);
-	int3 Pad3			: packoffset(c4.y);
+	int bNoOpacity		: packoffset(c0.x);
+	int3 Pad3			: packoffset(c0.y);
 };
 
 // Metallicafan212:	HACK!!!! This includes this twice to define the final color function, as HLSL cannot do out of order compiling
@@ -71,7 +71,7 @@ float4 PxShader(PSInput input) : SV_TARGET
 	}
 	
 	//return input.color + input.fog;
-	float4 FinalColor = (DoGammaCorrection(Diffuse.SampleBias(DiffState, input.uv, 0.0f)) * input.color);
+	float4 FinalColor = (Diffuse.SampleBias(DiffState, input.uv, 0.0f) * input.color);
 	FinalColor.xyz += input.fog.xyz;
 	
 	CLIP_PIXEL(FinalColor);

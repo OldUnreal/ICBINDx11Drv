@@ -85,8 +85,8 @@ void UDX11RenderTargetTexture::Destroy()
 {
 	guard(UDX11RenderTargetTexture::Destroy);
 
-	// Metallicafan212:	Make sure it's not bound?
-	if (D3DDev != nullptr)
+	// Metallicafan212:	Make sure it's not bound? And if the device is actually alive.....
+	if (D3DDev != nullptr && D3DDev->m_RenderContext != nullptr)
 	{
 		for (INT i = 0; i < MAX_TEXTURES; i++)
 		{
@@ -152,7 +152,7 @@ void ReplaceInText(FString& In, const TCHAR* Match, const TCHAR* With)
 
 #define DO_MANUAL_SCALE 0
 
-int UICBINDx11RenderDevice::DrawString(QWORD Flags, UFont* Font, INT& DrawX, INT& DrawY, const TCHAR* Text, const FPlane& Color, FLOAT Scale, FLOAT SpriteScaleX, FLOAT SpriteScaleY)
+int UICBINDx11RenderDevice::DrawString(QWORD Flags, UFont* Font, INT& DrawX, INT& DrawY, const TCHAR* Text, const FPlane& Color, UBOOL bHandleApersand, FLOAT Scale)
 {
 	guard(UICBINDx11RenderDevice::DrawString);
 
@@ -162,28 +162,15 @@ int UICBINDx11RenderDevice::DrawString(QWORD Flags, UFont* Font, INT& DrawX, INT
 	if (m_HitData != nullptr)
 		LocalColor = CurrentHitColor;
 
-	// Metallicafan212:	TODO! Draw using Direct2D
-
 	FString RealText = FString(Text);
 
-	// Metallicafan212:	TODO! Probably not needed for Direct2D, since it'll have these special characters that are in the Polish files
 	// Metallicafan212:	Replace the invalid characters
 	ReplaceInText(RealText, TEXT("–"), TEXT("--"));
 	ReplaceInText(RealText, TEXT("…"), TEXT("..."));
 
 	// Metallicafan212:	Use a local string to add a zero width character
-	FString LocalText = RealText;// + TEXT("‌");
+	FString LocalText = RealText;
 
-	/*
-	// Metallicafan212:	Search for a space
-	INT SpaceI = LocalText.InStr(TEXT(" "), 1);
-
-	if (SpaceI == LocalText.Len() - 1)
-	{
-		// Metallicafan212:	Add a & for sizing
-		LocalText.GetCharArray()[SpaceI] = L' ';
-	}
-	*/
 
 	UCanvas* Canvas = Viewport->Canvas;
 
@@ -304,26 +291,6 @@ int UICBINDx11RenderDevice::DrawString(QWORD Flags, UFont* Font, INT& DrawX, INT
 #else
 			FontMap[FontKey] = DaFont;
 #endif
-			/*
-			// Metallicafan212:	Per Scintilla, set the spacing to be consistent
-			DaFont->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-			IDWriteTextLayout* pTextLayout = nullptr;
-			hr = m_D2DWriteFact->CreateTextLayout(TEXT("X"), 1, DaFont, 100.0f, 100.0f, &pTextLayout);
-
-			if (SUCCEEDED(hr) && pTextLayout != nullptr)
-			{
-				constexpr int maxLines = 2;
-				DWRITE_LINE_METRICS lineMetrics[maxLines]{};
-				UINT32 lineCount = 0;
-				hr = pTextLayout->GetLineMetrics(lineMetrics, maxLines, &lineCount);
-
-				pTextLayout->Release();
-				DaFont->SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM, lineMetrics[0].height, lineMetrics[0].baseline);
-			}
-			*/
-
-			//FontMap.Set(*RealCopy, DaFont);
-
 			DaFont->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
 		}
 	}
@@ -340,11 +307,60 @@ int UICBINDx11RenderDevice::DrawString(QWORD Flags, UFont* Font, INT& DrawX, INT
 			DaFont->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
 		}
 
+		TArray<DWRITE_TEXT_RANGE> Ranges;
+
+		// Metallicafan212:	Search for (optional) underlying
+		if (bHandleApersand)
+		{
+			TArray<TCHAR>& Str = LocalText.GetCharArray();
+
+			for (INT i = 0; i < Str.Num(); i++)
+			{
+				TCHAR& C = Str(i);
+
+				if (C == '&')
+				{
+					// Metallicafan212:	See if the next character is valid
+					TCHAR& Next = Str(i + 1);
+					if (Next == '\0')
+					{
+						break;
+					}
+
+					if (Next != ' ' && Next != '&')
+					{
+						// Metallicafan212:	Remove the & and replace it with underline
+						DWRITE_TEXT_RANGE& Range = Ranges(Ranges.Add());;
+
+						Range.length		= 1;
+
+						// Metallicafan212:	i because we're removing this slot
+						Range.startPosition = i;
+
+						// Metallicafan212:	TODO! Handle multiple underlines
+
+						//layout->SetUnderline(TRUE, Range);
+
+						// Metallicafan212:	Now remove the slot
+						Str.Remove(i);
+
+						// Metallicafan212:	Don't i-- because we already confirmed the next character is fine
+					}
+				}
+			}
+		}
+
 		// Metallicafan212:	Create a text format to render it
 		IDWriteTextLayout* layout = nullptr;
 		hr = m_D2DWriteFact->CreateTextLayout(*LocalText, LocalText.Len(), DaFont, Canvas->ClipX, Canvas->ClipY, &layout);
 		
 		ThrowIfFailed(hr);
+
+		// Metallicafan212:	Set the underlines
+		for (INT i = 0; i < Ranges.Num(); i++)
+		{
+			layout->SetUnderline(TRUE, Ranges(i));
+		}
 
 		// Metallicafan212:	Now calculate the rect
 		DWRITE_TEXT_METRICS Met;
@@ -361,29 +377,22 @@ int UICBINDx11RenderDevice::DrawString(QWORD Flags, UFont* Font, INT& DrawX, INT
 		}
 #endif
 
-		DrawX += Met.widthIncludingTrailingWhitespace; /// ResolutionScale;//Met.width;
-		DrawY += Met.height; /// ResolutionScale;
+		DrawX += Met.widthIncludingTrailingWhitespace;
+		DrawY += Met.height;
 
 		// Metallicafan212:	PF_Invisible says to just calc the rect
 		if (!(Flags & PF_Invisible))
 		{
-			/*
-			// Metallicafan212:	Render NOW!!!!
-			if (m_D3DDeferredContext != nullptr)
-			{
-				m_D3DDeferredContext->FinishCommandList(FALSE, &m_D3DCommandList);
+			// Metallicafan212:	TODO! Add the ability to bunch up string draws, to speedup wine rendering!
+			//EndBuffering();
+			StartBuffering(BT_Strings);
 
-				m_D3DDeviceContext->ExecuteCommandList(m_D3DCommandList, FALSE);
-
-				SAFE_RELEASE(m_D3DCommandList);
-			}
-			*/
-
+			SetRasterState(DXRS_Normal); //| DXRS_NoAA);
 			// Metallicafan212:	IMPORTANT!!!! D2D seems to actually somewhat RESPECT the current shaders, so we need to use a generic shader for this
 			FGenShader->Bind(m_RenderContext);
 
 			// Metallicafan212:	Actually draw it now
-			m_CurrentD2DRT->BeginDraw();
+			//m_CurrentD2DRT->BeginDraw();
 
 			ID2D1SolidColorBrush* ColBrush = nullptr;
 			m_CurrentD2DRT->CreateSolidColorBrush(D2D1::ColorF(LocalColor.X, LocalColor.Y, LocalColor.Z, 1.f - LocalColor.W), &ColBrush);
@@ -399,38 +408,20 @@ int UICBINDx11RenderDevice::DrawString(QWORD Flags, UFont* Font, INT& DrawX, INT
 			{
 				// Center about DrawX.
 				X -= Met.widthIncludingTrailingWhitespace / 2.0f;
-				//Y -= Met.height / 2.0f;
 				W = Canvas->ClipX - X;
-				//H = Canvas->ClipY - Y;
-				//layout->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);//->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
 			}
-#if DO_MANUAL_SCALE
-			if (BoundRT == nullptr)
-			{
-				X *= ResolutionScale;
-				Y *= ResolutionScale;
-				W *= ResolutionScale;
-				H *= ResolutionScale;
-			}
-#else
-#if !RES_SCALE_IN_PROJ
-			if (BoundRT == nullptr && ResolutionScale != 1.0f)
-			{
-				D2D1::Matrix3x2F s = D2D1::Matrix3x2F::Scale(ResolutionScale, ResolutionScale);
-
-				// Metallicafan212:	Now apply the scale!!!
-				m_CurrentD2DRT->SetTransform(s);
-			}
-			else
-			{
-				m_CurrentD2DRT->SetTransform(D2D1::Matrix3x2F::Identity());
-			}
-#endif
-#endif
 
 			layout->SetMaxWidth(W);
 			layout->SetMaxHeight(H);
 
+			// Metallicafan212:	Now cache the draw
+			FD2DStringDraw& D = BufferedStrings[BufferedStrings.Add()];
+
+			D.Layout	= layout;
+			D.Color		= ColBrush;
+			D.Point		= D2D1::Point2F(X, Y);
+
+			/*
 			//m_D2DRT->FillRectangle(D2D1::RectF(0, 0, 1920, 1080), ColBrush);
 			m_CurrentD2DRT->DrawTextLayout(D2D1::Point2F(X, Y), layout, ColBrush, D2D1_DRAW_TEXT_OPTIONS_NONE); //D2D1_DRAW_TEXT_OPTIONS_CLIP);
 			
@@ -438,10 +429,14 @@ int UICBINDx11RenderDevice::DrawString(QWORD Flags, UFont* Font, INT& DrawX, INT
 			m_CurrentD2DRT->EndDraw();
 
 			ColBrush->Release();
+			*/
 		}
-
-		// Metallicafan212:	Release it outside the if lmao
-		layout->Release();
+		else
+		{
+			// Metallicafan212:	Only release it if we're just measuring it
+			//					TODO! Maybe cache it????
+			layout->Release();
+		}
 	}
 
 	return 1;
@@ -456,54 +451,54 @@ void UICBINDx11RenderDevice::SetDistanceFog(UBOOL Enable, FLOAT FogStart, FLOAT 
 	guard(UICBINDx11RenderDevice::SetDistanceFog);
 
 	// Metallicafan212:	Fog is already disabled?
-	if (!Enable && !GlobalShaderVars.bDoDistanceFog)
+	if (!Enable && !FogShaderVars.bDoDistanceFog)
 		return;
 
 	// Metallicafan212:	Update the values if it's enabled
-	GlobalShaderVars.FogFadeRate = FadeRate;
+	FogShaderVars.FogFadeRate = FadeRate;
 
 	if (Enable)
 	{
 		// Metallicafan212:	Check if it's equal
-		if(GlobalShaderVars.bDoDistanceFog && GlobalShaderVars.TargetFogColor == Color && GlobalShaderVars.CurrentFogStart == FogStart && GlobalShaderVars.CurrentFogEnd == FogEnd)
+		if(FogShaderVars.bDoDistanceFog && FogShaderVars.TargetFogColor == Color && FogShaderVars.CurrentFogStart == FogStart && FogShaderVars.CurrentFogEnd == FogEnd)
 			return;
 
 		// Metallicafan212:	Save the fog settings
-		GlobalShaderVars.LastFogColor		= GlobalShaderVars.DistanceFogColor;
-		GlobalShaderVars.LastFogSettings	= GlobalShaderVars.DistanceFogSettings;
+		FogShaderVars.LastFogColor		= FogShaderVars.DistanceFogColor;
+		FogShaderVars.LastFogSettings	= FogShaderVars.DistanceFogSettings;
 
 		// Metallicafan212:	Set the fog values
-		GlobalShaderVars.TargetFogColor		= Color;
+		FogShaderVars.TargetFogColor		= Color;
 
 		// Metallicafan212:	Start and end
-		GlobalShaderVars.TargetFogSettings	= FPlane(1.0f / (FogEnd - FogStart), (FogEnd / (FogEnd - FogStart)) - 1.0f, Color.W, 0.0f);
+		FogShaderVars.TargetFogSettings	= FPlane(1.0f / (FogEnd - FogStart), (FogEnd / (FogEnd - FogStart)) - 1.0f, Color.W, 0.0f);
 
-		GlobalShaderVars.bFadeFogValues		= 1;
+		FogShaderVars.bFadeFogValues		= 1;
 
-		GlobalShaderVars.CurrentFogStart	= FogStart;
-		GlobalShaderVars.CurrentFogEnd		= FogEnd;
+		FogShaderVars.CurrentFogStart	= FogStart;
+		FogShaderVars.CurrentFogEnd		= FogEnd;
 	}
 	else
 	{
 		// Metallicafan212:	Save the fog settings
-		GlobalShaderVars.LastFogColor		= GlobalShaderVars.DistanceFogColor;
-		GlobalShaderVars.LastFogSettings	= GlobalShaderVars.DistanceFogSettings;
+		FogShaderVars.LastFogColor		= FogShaderVars.DistanceFogColor;
+		FogShaderVars.LastFogSettings	= FogShaderVars.DistanceFogSettings;
 
 		// Metallicafan212:	Fade out
-		GlobalShaderVars.TargetFogColor		= FPlane(0.0f, 0.0f, 0.0f, 0.0f);
-		GlobalShaderVars.TargetFogSettings	= FPlane(1.0f / 32768.0f, 0.0f, 0.0f, 0.0f);
+		FogShaderVars.TargetFogColor		= FPlane(0.0f, 0.0f, 0.0f, 0.0f);
+		FogShaderVars.TargetFogSettings	= FPlane(1.0f / 32768.0f, 0.0f, 0.0f, 0.0f);
 
-		GlobalShaderVars.bFadeFogValues		= 1;
+		FogShaderVars.bFadeFogValues		= 1;
 
-		GlobalShaderVars.CurrentFogStart	= GlobalShaderVars.CurrentFogEnd = 0.0f;
+		FogShaderVars.CurrentFogStart	= FogShaderVars.CurrentFogEnd = 0.0f;
 	}
 
 
 	// Metallicafan212:	Grab the current time
-	GlobalShaderVars.FogSetTime = Viewport->CurrentTime.GetFloat();
+	FogShaderVars.FogSetTime = Viewport->CurrentTime.GetFloat();
 
 	// Metallicafan212:	Keep the val around, so we can selectively set blending
-	GlobalShaderVars.bDoDistanceFog = Enable;
+	FogShaderVars.bDoDistanceFog = Enable;
 
 	UpdateFogSettings();
 
@@ -516,17 +511,17 @@ void UICBINDx11RenderDevice::TickDistanceFog()
 	guard(UICBINDx11RenderDevice::TickDistanceFog);
 
 	// Metallicafan212:	If fog is disabled but we don't have 0 alpha, fade out
-	if (GlobalShaderVars.bFadeFogValues)
+	if (FogShaderVars.bFadeFogValues)
 	{
 		// Metallicafan212:	fade the current fog setting
-		FLOAT CurrPos = GlobalShaderVars.FogFadeRate <= 0.0f ? 1.0f : ((Viewport->CurrentTime.GetFloat() - GlobalShaderVars.FogSetTime) / GlobalShaderVars.FogFadeRate);
+		FLOAT CurrPos = FogShaderVars.FogFadeRate <= 0.0f ? 1.0f : ((Viewport->CurrentTime.GetFloat() - FogShaderVars.FogSetTime) / FogShaderVars.FogFadeRate);
 
 		if (CurrPos >= 1.0f)
 		{
-			GlobalShaderVars.DistanceFogColor		= GlobalShaderVars.TargetFogColor;
-			GlobalShaderVars.DistanceFogSettings	= GlobalShaderVars.TargetFogSettings;
+			FogShaderVars.DistanceFogColor		= FogShaderVars.TargetFogColor;
+			FogShaderVars.DistanceFogSettings	= FogShaderVars.TargetFogSettings;
 
-			GlobalShaderVars.bFadeFogValues = 0;
+			FogShaderVars.bFadeFogValues = 0;
 		}
 		else
 		{
@@ -537,17 +532,17 @@ void UICBINDx11RenderDevice::TickDistanceFog()
 			F.Z = Lerp(A.Z, B.Z, CurrPos); \
 			F.W = Lerp(A.W, B.W, CurrPos);
 
-			LERP_FPLANE(GlobalShaderVars.DistanceFogColor,		GlobalShaderVars.LastFogColor,		GlobalShaderVars.TargetFogColor);
-			LERP_FPLANE(GlobalShaderVars.DistanceFogSettings,	GlobalShaderVars.LastFogSettings,	GlobalShaderVars.TargetFogSettings);
+			LERP_FPLANE(FogShaderVars.DistanceFogColor,		FogShaderVars.LastFogColor,		FogShaderVars.TargetFogColor);
+			LERP_FPLANE(FogShaderVars.DistanceFogSettings,	FogShaderVars.LastFogSettings,	FogShaderVars.TargetFogSettings);
 		}
 	}
 
 	// Metallicafan212:	Set the alpha on the other arrays
-	GlobalShaderVars.ModFogColor.W		= GlobalShaderVars.DistanceFogColor.W;
-	GlobalShaderVars.TransFogColor.W	= GlobalShaderVars.DistanceFogColor.W;
+	FogShaderVars.ModFogColor.W		= FogShaderVars.DistanceFogColor.W;
+	FogShaderVars.TransFogColor.W	= FogShaderVars.DistanceFogColor.W;
 
 	// Metallicafan212:	Keep a copy so we can swap it for the modulated and translucent hacks
-	GlobalShaderVars.DistanceFogFinal	= GlobalShaderVars.DistanceFogColor;
+	FogShaderVars.DistanceFogFinal	= FogShaderVars.DistanceFogColor;
 
 	UpdateFogSettings();
 
@@ -556,14 +551,14 @@ void UICBINDx11RenderDevice::TickDistanceFog()
 
 void UICBINDx11RenderDevice::ForceSetFogColor(FPlane FogColor)
 {
-	guard(UICBINDx11RenderDevice::ForceSetFogColor);
+	guardSlow(UICBINDx11RenderDevice::ForceSetFogColor);
 
 	// Metallicafan212:	TODO!
-	GlobalShaderVars.DistanceFogColor = FogColor;
+	FogShaderVars.DistanceFogColor = FogColor;
 
 	UpdateGlobalShaderVars();
 
-	unguard;
+	unguardSlow;
 }
 
 // Metallicafan212:	Simple BW shader for doing stupid "old-time" looking shit
@@ -573,13 +568,13 @@ void UICBINDx11RenderDevice::SetBWPercent(FLOAT Percent)
 
 	Percent = Clamp(Percent, 0.0f, 1.0f);
 
-	if (Percent != GlobalPolyflagVars.BWPercent)//GlobalShaderVars.BWPercent)
+	if (Percent != GlobalPolyflagVars.BWPercent)//FogShaderVars.BWPercent)
 	{
 		// Metallicafan212:	End any buffering now
 		EndBuffering();
 
 		// Metallicafan212:	Update it
-		//GlobalShaderVars.BWPercent = Percent;
+		//FogShaderVars.BWPercent = Percent;
 		GlobalPolyflagVars.BWPercent = Percent;
 
 		UpdatePolyflagsVars();
@@ -815,7 +810,14 @@ void UICBINDx11RenderDevice::RestoreRenderTarget()
 	// Metallicafan212:	Reset
 	if (RTStack.Num() == 0)
 	{
-		m_RenderContext->OMSetRenderTargets(1, &m_D3DScreenRTV, m_D3DScreenDSV);
+		if (FrameShaderVars.bDoSelection)//m_HitData != nullptr)
+		{
+			m_RenderContext->OMSetRenderTargets(1, &m_BackBuffRT, m_SelectionDSV);
+		}
+		else
+		{
+			m_RenderContext->OMSetRenderTargets(1, &m_D3DScreenRTV, m_D3DScreenDSV);
+		}
 
 		// Metallicafan212:	Resolve the RT Texture
 		if (BoundRT != nullptr)
