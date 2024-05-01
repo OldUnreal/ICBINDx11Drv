@@ -162,7 +162,12 @@ void FShaderManager::LoadHardcodedShaders()
 
 # Metallicafan212: Now that everything is defined, loop through and compile each shader
 #                  Note that the FXC path is hard-coded here because it's not on the path variable
-fxc_path = 'C:\\Program Files (x86)\\Windows Kits\\10\\bin\\10.0.22621.0\\x86\\fxc.exe';
+fxc_check = subprocess.run("fxc /?", text=True, check=False, capture_output=True)
+
+if "Direct3D Shader Compiler" in fxc_check.stdout:
+    fxc_path = 'fxc.exe';
+else:
+    fxc_path = 'C:\\Program Files (x86)\\Windows Kits\\10\\bin\\10.0.22621.0\\x86\\fxc.exe';
 
 for Shad in ShaderArray :
     # Metallicafan212: Process this shader
